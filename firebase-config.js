@@ -1,5 +1,5 @@
 window.FIREBASE_CONFIG = {
-  apiKey: "AIzaSyCyXTU0SLJj4chMoO_t8EZxGsImlssk-Jk",
+  apiKey: "AIzaSyA68SnF6v1WBKXpXTEmslw3WZjv8xMKLoY",
   authDomain: "evyatars-flashcards.firebaseapp.com",
   projectId: "evyatars-flashcards",
   storageBucket: "evyatars-flashcards.firebasestorage.app",
