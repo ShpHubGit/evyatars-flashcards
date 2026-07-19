@@ -1,4 +1,4 @@
-window.firebaseConfig = {
+window.FIREBASE_CONFIG = {
   apiKey: "AIzaSyCyXTU0SLJj4chMoO_t8EZxGsImlssk-Jk",
   authDomain: "evyatars-flashcards.firebaseapp.com",
   projectId: "evyatars-flashcards",
