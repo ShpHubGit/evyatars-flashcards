@@ -4,5 +4,5 @@ window.FIREBASE_CONFIG = {
   projectId: "evyatars-flashcards",
   storageBucket: "evyatars-flashcards.firebasestorage.app",
   messagingSenderId: "437780608642",
-  appId: "1:437780608642:web:521cee693fdfb6e31f269b"
+  appId: "1:437780608642:web:4d4f07d5637e112d1f269b"
 };
