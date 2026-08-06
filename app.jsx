@@ -164,6 +164,114 @@ function shuffleArr(arr) {
   return a;
 }
 
+/* ---------- lookups: translation + pictures (both free, no API key) ---------- */
+
+// niqqud confuses machine translation, so send the bare letters
+const stripNiqqud = (s) => (s || "").replace(/[\u0591-\u05C7]/g, "");
+
+async function translateHeToEn(text) {
+  const q = stripNiqqud(text).trim();
+  if (!q) throw new Error("empty");
+  const res = await fetch(
+    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=he|en`
+  );
+  if (!res.ok) throw new Error("http");
+  const j = await res.json();
+  const t = (j?.responseData?.translatedText || "").trim();
+  if (!t || t === q || /mymemory warning|invalid|query length/i.test(t)) throw new Error("no result");
+  // MyMemory sometimes SHOUTS; make it look like the rest of the deck
+  return t === t.toUpperCase() && t.length > 3 ? t.toLowerCase() : t;
+}
+
+async function searchPictures(term) {
+  const q = (term || "").trim();
+  if (!q) return [];
+  const url =
+    "https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*" +
+    "&generator=search&gsrnamespace=6&gsrlimit=12&prop=imageinfo&iiprop=url&iiurlwidth=500" +
+    `&gsrsearch=${encodeURIComponent(q + " filetype:bitmap")}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("http");
+  const j = await res.json();
+  const pages = j?.query?.pages ? Object.values(j.query.pages) : [];
+  return pages
+    .map((p) => ({
+      title: (p.title || "").replace(/^File:/, ""),
+      thumb: p.imageinfo?.[0]?.thumburl || "",
+    }))
+    .filter((x) => x.thumb && /\.(jpe?g|png|gif|webp)$/i.test(x.thumb))
+    .slice(0, 8);
+}
+
+/* ---------- Blooket export ---------- */
+
+const csvCell = (v) => {
+  const s = String(v ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+const BLOOKET_HEADER = [
+  "Question #",
+  "Question Text",
+  "Answer 1",
+  "Answer 2",
+  "Answer 3 (Optional)",
+  "Answer 4 (Optional)",
+  "Time Limit (sec)",
+  "Correct Answer(s)",
+];
+
+// Blooket only takes multiple choice, so each word becomes a question with
+// wrong answers borrowed from the same deck — same idea as the reading quiz.
+function buildBlooketRows(deck, dir, seconds) {
+  const cards = deck.cards.filter((c) => (c.he || "").trim() && (c.en || "").trim());
+  const ask = (c) => (dir === "en2he" ? c.en : c.he);
+  const ans = (c) => (dir === "en2he" ? c.he : c.en);
+  return cards.map((card, i) => {
+    const seen = new Set([ans(card).trim().toLowerCase()]);
+    const wrong = [];
+    for (const other of shuffleArr(cards)) {
+      if (other.id === card.id) continue;
+      const k = ans(other).trim().toLowerCase();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      wrong.push(ans(other));
+      if (wrong.length === 3) break;
+    }
+    const options = shuffleArr([ans(card), ...wrong]);
+    return [
+      i + 1,
+      ask(card),
+      options[0] || "",
+      options[1] || "",
+      options[2] || "",
+      options[3] || "",
+      seconds,
+      options.indexOf(ans(card)) + 1,
+    ];
+  });
+}
+
+const toCSV = (rows) => [BLOOKET_HEADER, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
+const toTSV = (rows) => rows.map((r) => r.join("\t")).join("\n");
+
+function downloadText(text, filename, mime) {
+  try {
+    const blob = new Blob([text], { type: `${mime};charset=utf-8;` });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function buildQuestions(deck) {
   return shuffleArr(deck.cards).map((card) => {
     const seen = new Set([card.en.trim().toLowerCase()]);
@@ -694,6 +802,22 @@ export default function App() {
           }}
         />
       )}
+      {modal?.type === "bulkAdd" && (
+        <BulkAddModal
+          onClose={() => setModal(null)}
+          onSave={(cards) => {
+            update((d) => {
+              const dk = d.classes.find((c) => c.id === view.classId).decks.find((x) => x.id === view.deckId);
+              dk.cards.push(...cards.map((c) => ({ id: uid(), ...c })));
+              return d;
+            });
+            setModal(null);
+          }}
+        />
+      )}
+      {modal?.type === "blooket" && deck && (
+        <BlooketModal deck={deck} onClose={() => setModal(null)} />
+      )}
       {modal?.type === "confirm" && (
         <Modal title={modal.title} onClose={() => setModal(null)}>
           <p style={{ color: T.inkSoft, fontSize: 14, marginTop: 0 }}>{modal.body}</p>
@@ -818,6 +942,8 @@ export default function App() {
           {teacher && (
             <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <Btn onClick={() => setView({ page: "report", classId: view.classId, deckId: deck.id })}>📊 Report</Btn>
+              <Btn onClick={() => setModal({ type: "blooket" })} disabled={deck.cards.length < 2} title={deck.cards.length < 2 ? "Needs at least 2 cards" : "Export this deck for Blooket"}>⬇️ Blooket</Btn>
+              <Btn onClick={() => setModal({ type: "bulkAdd" })}>📋 Bulk add</Btn>
               <Btn onClick={() => setModal({ type: "editCard" })}>+ Add card</Btn>
             </span>
           )}
@@ -2027,16 +2153,98 @@ function NameModal({ title, initial, placeholder, onSave, onClose }) {
   );
 }
 
+/* small helper used by the card editor and bulk add */
+function PicturePicker({ term, value, onPick }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [hits, setHits] = useState(null);
+  const [err, setErr] = useState("");
+
+  const run = async () => {
+    setOpen(true); setBusy(true); setErr(""); setHits(null);
+    try {
+      const r = await searchPictures(term);
+      setHits(r);
+      if (!r.length) setErr("Nothing found for that word. Try a simpler English word, or paste a link yourself.");
+    } catch (e) {
+      setErr("Picture search didn't respond. Paste a link yourself, or try again in a moment.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <Btn onClick={run} disabled={!term.trim() || busy} title={!term.trim() ? "Fill in the English word first" : undefined}>
+          {busy ? "Searching…" : "🔍 Find a picture"}
+        </Btn>
+        {value ? <Btn kind="danger" onClick={() => onPick("")}>Remove picture</Btn> : null}
+        {open && !busy && hits && hits.length > 0 && (
+          <button onClick={() => setOpen(false)} style={{ border: "none", background: "none", fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft, cursor: "pointer", textDecoration: "underline" }}>
+            hide results
+          </button>
+        )}
+      </div>
+      {err && <p style={{ fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft, margin: "8px 0 0" }}>{err}</p>}
+      {open && hits && hits.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))", gap: 6, marginTop: 8 }}>
+            {hits.map((h) => (
+              <button
+                key={h.thumb}
+                onClick={() => { onPick(h.thumb); setOpen(false); }}
+                title={h.title}
+                style={{
+                  padding: 0, border: `2px solid ${value === h.thumb ? T.blue : T.line}`, borderRadius: 10,
+                  overflow: "hidden", cursor: "pointer", background: "#fff", height: 72,
+                }}
+              >
+                <img src={h.thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onError={(e) => { e.currentTarget.parentElement.style.display = "none"; }} />
+              </button>
+            ))}
+          </div>
+          <p style={{ fontFamily: uiFont, fontSize: 11.5, color: T.inkSoft, margin: "6px 0 0" }}>
+            From Wikimedia Commons (freely licensed). Tap one to use it.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CardModal({ card, onSave, onClose }) {
   const [he, setHe] = useState(card?.he || "");
   const [en, setEn] = useState(card?.en || "");
   const [tr, setTr] = useState(card?.tr || "");
   const [img, setImg] = useState(card?.img || "");
   const [imgOk, setImgOk] = useState(true);
+  const [tBusy, setTBusy] = useState(false);
+  const [tErr, setTErr] = useState("");
+
+  const suggest = async () => {
+    if (!he.trim()) return;
+    setTBusy(true); setTErr("");
+    try {
+      setEn(await translateHeToEn(he));
+    } catch (e) {
+      setTErr("Couldn't get a suggestion — type the English yourself.");
+    }
+    setTBusy(false);
+  };
+
   return (
     <Modal title={card ? "Edit card" : "New card"} onClose={onClose}>
       <Field label="Hebrew (niqqud welcome)" value={he} onChange={setHe} rtl placeholder="שָׁלוֹם" autoFocus />
       <Field label="English" value={en} onChange={setEn} placeholder="hello / peace" />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: -6, marginBottom: 12, flexWrap: "wrap" }}>
+        <Btn onClick={suggest} disabled={!he.trim() || tBusy} style={{ fontSize: 13, padding: "7px 12px" }}>
+          {tBusy ? "Translating…" : "✨ Suggest English"}
+        </Btn>
+        <span style={{ fontFamily: uiFont, fontSize: 12, color: tErr ? T.pom : T.inkSoft }}>
+          {tErr || "A machine guess — check it says what you teach."}
+        </span>
+      </div>
       <Field label="Transliteration (optional)" value={tr} onChange={setTr} placeholder="shalom" />
       <Field
         label="Picture link (optional)"
@@ -2044,6 +2252,7 @@ function CardModal({ card, onSave, onClose }) {
         onChange={(v) => { setImg(v); setImgOk(true); }}
         placeholder="https://…/picture.jpg"
       />
+      <PicturePicker term={en} value={img} onPick={(u) => { setImg(u); setImgOk(true); }} />
       {img.trim() && (
         imgOk ? (
           <img
@@ -2066,6 +2275,215 @@ function CardModal({ card, onSave, onClose }) {
         <Btn kind="primary" disabled={!he.trim() || !en.trim()} onClick={() => onSave({ he: he.trim(), en: en.trim(), tr: tr.trim(), img: img.trim() })}>
           Save card
         </Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function BulkAddModal({ onSave, onClose }) {
+  const [text, setText] = useState("");
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [note, setNote] = useState("");
+
+  const parse = (t) => {
+    const out = [];
+    for (const raw of (t || "").split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      const parts = line.includes("\t") ? line.split("\t") : line.split(",");
+      const he = (parts[0] || "").trim();
+      if (!he) continue;
+      out.push({
+        he,
+        en: (parts[1] || "").trim(),
+        tr: (parts[2] || "").trim(),
+        img: (parts[3] || "").trim(),
+      });
+    }
+    return out;
+  };
+
+  const onText = (t) => { setText(t); setRows(parse(t)); setNote(""); };
+
+  const missing = rows.filter((r) => !r.en).length;
+
+  const fillMissing = async () => {
+    setBusy(true); setNote("");
+    const next = [...rows];
+    let failed = 0, n = 0;
+    for (let i = 0; i < next.length; i++) {
+      if (next[i].en) continue;
+      n++;
+      setProgress(`Translating ${n} of ${missing}…`);
+      try {
+        next[i] = { ...next[i], en: await translateHeToEn(next[i].he) };
+      } catch (e) {
+        failed++;
+      }
+      setRows([...next]);
+      await new Promise((r) => setTimeout(r, 350)); // be gentle with the free service
+    }
+    setBusy(false); setProgress("");
+    setNote(
+      failed
+        ? `${failed} word${failed === 1 ? "" : "s"} couldn't be translated — fill those in below.`
+        : "Done. Check each line before adding — machine translations pick one meaning, not always the one you teach."
+    );
+  };
+
+  const setRowEn = (i, v) => setRows((rs) => rs.map((r, x) => (x === i ? { ...r, en: v } : r)));
+  const ready = rows.filter((r) => r.he.trim() && r.en.trim());
+
+  const small = { fontFamily: uiFont, fontSize: 13, color: T.inkSoft };
+
+  return (
+    <Modal title="Bulk add cards" onClose={onClose}>
+      <p style={{ ...small, marginTop: 0 }}>
+        One word per line. Paste straight from a spreadsheet, or type
+        <code style={{ fontSize: 12 }}> Hebrew, English, transliteration</code> — English and transliteration are optional.
+      </p>
+      <textarea
+        dir="auto"
+        value={text}
+        onChange={(e) => onText(e.target.value)}
+        placeholder={"שָׁלוֹם, hello, shalom\nתּוֹדָה, thank you, toda\nכֶּלֶב"}
+        style={{
+          width: "100%", boxSizing: "border-box", height: 110, fontFamily: heFont, fontSize: 16,
+          border: `1.5px solid ${T.line}`, borderRadius: 10, padding: 10, color: T.ink, background: "#fff", resize: "vertical",
+        }}
+      />
+      {rows.length > 0 && (
+        <>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "10px 0" }}>
+            <span style={{ ...small, fontWeight: 600, color: T.ink }}>{rows.length} line{rows.length === 1 ? "" : "s"}</span>
+            {missing > 0 && (
+              <Btn onClick={fillMissing} disabled={busy} style={{ fontSize: 13, padding: "7px 12px" }}>
+                {busy ? progress || "Translating…" : `✨ Suggest English for ${missing}`}
+              </Btn>
+            )}
+          </div>
+          {note && <p style={{ ...small, marginTop: 0 }}>{note}</p>}
+          <div style={{ maxHeight: 200, overflowY: "auto", border: `1.5px solid ${T.line}`, borderRadius: 10, marginBottom: 10 }}>
+            {rows.map((r, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
+                <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 19, color: T.ink, minWidth: 90, textAlign: "right" }}>{r.he}</span>
+                <input
+                  value={r.en}
+                  onChange={(e) => setRowEn(i, e.target.value)}
+                  placeholder="English…"
+                  style={{
+                    flex: 1, minWidth: 0, fontFamily: uiFont, fontSize: 14, padding: "6px 8px",
+                    border: `1.5px solid ${r.en.trim() ? T.line : T.pomSoft}`, borderRadius: 8, background: "#fff", color: T.ink, outline: "none",
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+        {rows.length > ready.length && (
+          <span style={{ ...small, marginRight: "auto", color: T.pom }}>
+            {rows.length - ready.length} line{rows.length - ready.length === 1 ? "" : "s"} still need English
+          </span>
+        )}
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn kind="primary" disabled={!ready.length || busy} onClick={() => onSave(ready)}>
+          Add {ready.length || ""} card{ready.length === 1 ? "" : "s"}
+        </Btn>
+      </div>
+      <p style={{ ...small, fontSize: 12, marginBottom: 0 }}>
+        Pictures aren't added here — open a card afterwards to find one.
+      </p>
+    </Modal>
+  );
+}
+
+function BlooketModal({ deck, onClose }) {
+  const [dir, setDir] = useState("he2en");
+  const [seconds, setSeconds] = useState(20);
+  const [copied, setCopied] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const rows = useMemo(() => buildBlooketRows(deck, dir, seconds), [deck, dir, seconds]);
+  const skipped = deck.cards.length - rows.length;
+  const thin = rows.filter((r) => !r[3]).length; // fewer than 2 answer options
+  const small = { fontFamily: uiFont, fontSize: 13.5, color: T.inkSoft };
+  const safeName = (deck.name || "deck").replace(/[^\w\u05D0-\u05EA -]/g, "").trim().replace(/\s+/g, "-") || "deck";
+
+  const radio = (val, label, sub) => (
+    <label style={{ display: "flex", gap: 9, alignItems: "flex-start", cursor: "pointer", marginBottom: 8 }}>
+      <input type="radio" checked={dir === val} onChange={() => setDir(val)} style={{ marginTop: 3, accentColor: T.blue }} />
+      <span>
+        <span style={{ fontFamily: uiFont, fontSize: 14.5, color: T.ink }}>{label}</span>
+        <span style={{ display: "block", fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft }}>{sub}</span>
+      </span>
+    </label>
+  );
+
+  return (
+    <Modal title="Export for Blooket" onClose={onClose}>
+      <p style={{ ...small, marginTop: 0 }}>
+        Blooket only takes multiple-choice questions, so each word becomes one question with wrong answers
+        pulled from this same deck.
+      </p>
+
+      <div style={{ marginBottom: 10 }}>
+        {radio("he2en", "Hebrew question → English answers", "Matches the reading quiz. Easier — recognition.")}
+        {radio("en2he", "English question → Hebrew answers", "Harder — recall, like speaking practice.")}
+      </div>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14, fontFamily: uiFont, fontSize: 14, color: T.ink }}>
+        Seconds per question
+        <input
+          type="number" min="5" max="300" value={seconds}
+          onChange={(e) => setSeconds(Math.max(5, Math.min(300, parseInt(e.target.value, 10) || 20)))}
+          style={{ width: 70, fontFamily: uiFont, fontSize: 14, padding: "6px 8px", border: `1.5px solid ${T.line}`, borderRadius: 8, outline: "none", color: T.ink, background: "#fff" }}
+        />
+      </label>
+
+      <div style={{ background: T.blueSoft, borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontFamily: uiFont, fontSize: 13.5, color: T.ink }}>
+        {rows.length} question{rows.length === 1 ? "" : "s"} ready
+        {skipped > 0 && <span style={{ color: T.pom }}> · {skipped} card{skipped === 1 ? "" : "s"} skipped (missing Hebrew or English)</span>}
+        {thin > 0 && <span style={{ color: T.inkSoft }}> · {thin} will have only 2 choices (small deck)</span>}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <Btn
+          kind="primary"
+          onClick={() => {
+            const ok = downloadText(toCSV(rows), `${safeName}-blooket.csv`, "text/csv");
+            setMsg(ok ? "Downloaded. In Blooket: Create → Spreadsheet Import → Upload CSV." : "Download blocked — use the copy button instead.");
+          }}
+        >
+          ⬇️ Download CSV
+        </Btn>
+        <Btn
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(toTSV(rows));
+              setCopied(true);
+              setMsg("Copied. Open Blooket's spreadsheet template and paste into the first empty data row.");
+            } catch (e) {
+              setMsg("Copy failed — use the download button instead.");
+            }
+          }}
+        >
+          {copied ? "Copied ✓" : "📋 Copy for the template"}
+        </Btn>
+      </div>
+      {msg && <p style={{ ...small, marginTop: 0 }}>{msg}</p>}
+
+      <p style={{ ...small, fontSize: 12.5 }}>
+        Two ways in, if one gives you trouble: upload the CSV directly, or copy the rows and paste them into
+        Blooket's own template (Create → Spreadsheet Import → Copy), then download that as CSV. Check the Hebrew
+        looks right in Blooket before class — some sites render niqqud and right-to-left text imperfectly.
+      </p>
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <Btn onClick={onClose}>Close</Btn>
       </div>
     </Modal>
   );
