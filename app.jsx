@@ -818,6 +818,38 @@ export default function App() {
       {modal?.type === "blooket" && deck && (
         <BlooketModal deck={deck} onClose={() => setModal(null)} />
       )}
+      {modal?.type === "deckAction" && (
+        <DeckActionModal
+          mode={modal.mode}
+          deck={modal.deck}
+          classes={data.classes}
+          currentClassId={view.classId}
+          onClose={() => setModal(null)}
+          onConfirm={(targetClassId, newName) => {
+            update((d) => {
+              const from = d.classes.find((c) => c.id === view.classId);
+              const to = d.classes.find((c) => c.id === targetClassId);
+              if (!from || !to) return d;
+              if (modal.mode === "move") {
+                const i = from.decks.findIndex((x) => x.id === modal.deck.id);
+                if (i === -1) return d;
+                const [moved] = from.decks.splice(i, 1);
+                to.decks.push(moved);
+              } else {
+                const src = from.decks.find((x) => x.id === modal.deck.id);
+                if (!src) return d;
+                to.decks.push({
+                  id: uid(),
+                  name: newName,
+                  cards: src.cards.map((c) => ({ ...c, id: uid() })),
+                });
+              }
+              return d;
+            });
+            setModal(null);
+          }}
+        />
+      )}
       {modal?.type === "confirm" && (
         <Modal title={modal.title} onClose={() => setModal(null)}>
           <p style={{ color: T.inkSoft, fontSize: 14, marginTop: 0 }}>{modal.body}</p>
@@ -901,6 +933,8 @@ export default function App() {
               onOpen={() => setView({ page: "deck", classId: cls.id, deckId: dk.id })}
               teacher={teacher}
               onEdit={() => setModal({ type: "editDeck", deck: dk })}
+              onDuplicate={() => setModal({ type: "deckAction", mode: "copy", deck: dk })}
+              onMove={() => setModal({ type: "deckAction", mode: "move", deck: dk })}
               onDelete={() =>
                 setModal({
                   type: "confirm",
@@ -2051,7 +2085,7 @@ function PageIntro({ eyebrow, title, sub, color }) {
   );
 }
 
-function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, color = SHUK[0], letter, badge }) {
+function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, onDuplicate, onMove, color = SHUK[0], letter, badge }) {
   return (
     <div
       style={{
@@ -2096,6 +2130,8 @@ function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, color = SH
       <p style={{ fontFamily: uiFont, fontSize: 13, color: color.dark, margin: 0, position: "relative" }}>{meta}</p>
       {teacher && (
         <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          {onDuplicate && <IconBtn label="Duplicate deck" onClick={onDuplicate}>⧉</IconBtn>}
+          {onMove && <IconBtn label="Move to another class" onClick={onMove}>→</IconBtn>}
           <IconBtn label="Rename" onClick={onEdit}>✎</IconBtn>
           <IconBtn label="Delete" danger onClick={onDelete}>🗑</IconBtn>
         </div>
@@ -2397,6 +2433,73 @@ function BulkAddModal({ onSave, onClose }) {
       <p style={{ ...small, fontSize: 12, marginBottom: 0 }}>
         Pictures aren't added here — open a card afterwards to find one.
       </p>
+    </Modal>
+  );
+}
+
+function DeckActionModal({ mode, deck, classes, currentClassId, onClose, onConfirm }) {
+  const copy = mode === "copy";
+  const targets = copy ? classes : classes.filter((c) => c.id !== currentClassId);
+  const [target, setTarget] = useState(copy ? currentClassId : targets[0]?.id || "");
+  const [name, setName] = useState(`${deck.name} (copy)`);
+  const small = { fontFamily: uiFont, fontSize: 13.5, color: T.inkSoft };
+
+  if (!targets.length) {
+    return (
+      <Modal title="Move deck" onClose={onClose}>
+        <p style={{ ...small, marginTop: 0 }}>
+          There's only one class, so there's nowhere to move this deck yet. Add another class first.
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <Btn kind="primary" onClick={onClose}>OK</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title={copy ? "Duplicate deck" : "Move deck"} onClose={onClose}>
+      <p style={{ ...small, marginTop: 0 }}>
+        <strong style={{ color: T.ink, fontWeight: 600 }}>{deck.name}</strong>
+        {" — "}
+        {deck.cards.length} card{deck.cards.length === 1 ? "" : "s"}
+      </p>
+
+      {copy && <Field label="Name for the copy" value={name} onChange={setName} autoFocus />}
+
+      <label style={{ display: "block", marginBottom: 12 }}>
+        <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: T.inkSoft, marginBottom: 5, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+          {copy ? "Put the copy in" : "Move to"}
+        </span>
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          style={{
+            width: "100%", boxSizing: "border-box", fontFamily: uiFont, fontSize: 15,
+            padding: "10px 12px", border: `1.5px solid ${T.line}`, borderRadius: 10,
+            background: "#fff", color: T.ink, outline: "none",
+          }}
+        >
+          {targets.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}{c.id === currentClassId ? " (same class)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <p style={{ ...small, fontSize: 12.5 }}>
+        {copy
+          ? "The copy is a separate deck: it starts with an empty report, and editing it later won't change the original."
+          : "The deck keeps its cards and its report history — only the class it sits in changes."}
+      </p>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn kind="primary" disabled={!target || (copy && !name.trim())} onClick={() => onConfirm(target, name.trim())}>
+          {copy ? "Make a copy" : "Move deck"}
+        </Btn>
+      </div>
     </Modal>
   );
 }
