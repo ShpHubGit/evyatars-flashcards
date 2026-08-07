@@ -2729,18 +2729,24 @@ function FillTrModal({ deck, onClose, onSave }) {
 
 function BlooketModal({ deck, onClose }) {
   const [dir, setDir] = useState("he2en");
-  const [seconds, setSeconds] = useState(20);
+  const [sep, setSep] = useState("\t");
+  const [bare, setBare] = useState(false);
   const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState("");
+  const [more, setMore] = useState(false);
+  const [seconds, setSeconds] = useState(20);
 
-  const rows = useMemo(() => buildBlooketRows(deck, dir, seconds), [deck, dir, seconds]);
-  const skipped = deck.cards.length - rows.length;
-  const thin = rows.filter((r) => !r[3]).length; // fewer than 2 answer options
+  const cards = deck.cards.filter((c) => (c.he || "").trim() && (c.en || "").trim());
+  const heOf = (c) => (bare ? stripNiqqud(c.he) : c.he).trim();
+  const pair = (c) => (dir === "en2he" ? [c.en.trim(), heOf(c)] : [heOf(c), c.en.trim()]);
+  const lines = cards.map((c) => pair(c).join(sep));
+  const text = lines.join("\n");
+  const skipped = deck.cards.length - cards.length;
   const small = { fontFamily: uiFont, fontSize: 13.5, color: T.inkSoft };
   const safeName = (deck.name || "deck").replace(/[^\w\u05D0-\u05EA -]/g, "").trim().replace(/\s+/g, "-") || "deck";
 
   const radio = (val, label, sub) => (
-    <label style={{ display: "flex", gap: 9, alignItems: "flex-start", cursor: "pointer", marginBottom: 8 }}>
+    <label style={{ display: "flex", gap: 9, alignItems: "flex-start", cursor: "pointer", marginBottom: 7 }}>
       <input type="radio" checked={dir === val} onChange={() => setDir(val)} style={{ marginTop: 3, accentColor: T.blue }} />
       <span>
         <span style={{ fontFamily: uiFont, fontSize: 14.5, color: T.ink }}>{label}</span>
@@ -2752,63 +2758,111 @@ function BlooketModal({ deck, onClose }) {
   return (
     <Modal title="Export for Blooket" onClose={onClose}>
       <p style={{ ...small, marginTop: 0 }}>
-        Blooket only takes multiple-choice questions, so each word becomes one question with wrong answers
-        pulled from this same deck.
+        {cards.length} word{cards.length === 1 ? "" : "s"} ready
+        {skipped > 0 && <span style={{ color: T.pom }}> · {skipped} skipped (missing Hebrew or English)</span>}
       </p>
 
       <div style={{ marginBottom: 10 }}>
-        {radio("he2en", "Hebrew question → English answers", "Matches the reading quiz. Easier — recognition.")}
-        {radio("en2he", "English question → Hebrew answers", "Harder — recall, like speaking practice.")}
+        {radio("he2en", "Hebrew first, then English", "Hebrew is the question.")}
+        {radio("en2he", "English first, then Hebrew", "English is the question.")}
       </div>
 
-      <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14, fontFamily: uiFont, fontSize: 14, color: T.ink }}>
-        Seconds per question
-        <input
-          type="number" min="5" max="300" value={seconds}
-          onChange={(e) => setSeconds(Math.max(5, Math.min(300, parseInt(e.target.value, 10) || 20)))}
-          style={{ width: 70, fontFamily: uiFont, fontSize: 14, padding: "6px 8px", border: `1.5px solid ${T.line}`, borderRadius: 8, outline: "none", color: T.ink, background: "#fff" }}
-        />
-      </label>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", fontFamily: uiFont, fontSize: 13.5, color: T.ink }}>
+          Separated by
+          <select
+            value={sep}
+            onChange={(e) => setSep(e.target.value)}
+            style={{ fontFamily: uiFont, fontSize: 13.5, padding: "6px 8px", border: `1.5px solid ${T.line}`, borderRadius: 8, background: "#fff", color: T.ink, outline: "none" }}
+          >
+            <option value={"\t"}>Tab (safest)</option>
+            <option value={","}>Comma</option>
+            <option value={" - "}>Dash</option>
+            <option value={" "}>Space</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", cursor: "pointer", fontFamily: uiFont, fontSize: 13.5, color: T.ink }}>
+          <input type="checkbox" checked={bare} onChange={(e) => setBare(e.target.checked)} style={{ width: 15, height: 15, accentColor: T.blue }} />
+          Remove niqqud
+        </label>
+      </div>
 
-      <div style={{ background: T.blueSoft, borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontFamily: uiFont, fontSize: 13.5, color: T.ink }}>
-        {rows.length} question{rows.length === 1 ? "" : "s"} ready
-        {skipped > 0 && <span style={{ color: T.pom }}> · {skipped} card{skipped === 1 ? "" : "s"} skipped (missing Hebrew or English)</span>}
-        {thin > 0 && <span style={{ color: T.inkSoft }}> · {thin} will have only 2 choices (small deck)</span>}
+      {sep === " " && (
+        <p style={{ ...small, color: T.pom, marginTop: -4 }}>
+          A space can't be told apart from the spaces inside "thank you" or "יוֹם הֻלֶּדֶת" — Blooket may split those
+          in the wrong place. Tab is safer.
+        </p>
+      )}
+
+      <div style={{ border: `1.5px solid ${T.line}`, borderRadius: 10, background: "#fff", padding: "8px 10px", marginBottom: 10, maxHeight: 120, overflowY: "auto" }}>
+        {lines.slice(0, 5).map((l, i) => (
+          <div key={i} dir="auto" style={{ fontFamily: uiFont, fontSize: 13.5, color: T.ink, whiteSpace: "pre-wrap", padding: "2px 0", unicodeBidi: "plaintext" }}>
+            {l.replace(/\t/g, "    ")}
+          </div>
+        ))}
+        {lines.length > 5 && <div style={{ ...small, fontSize: 12, paddingTop: 4 }}>…and {lines.length - 5} more</div>}
       </div>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
         <Btn
           kind="primary"
-          onClick={() => {
-            const ok = downloadText(toCSV(rows), `${safeName}-blooket.csv`, "text/csv");
-            setMsg(ok ? "Downloaded. In Blooket: Create → Spreadsheet Import → Upload CSV." : "Download blocked — use the copy button instead.");
-          }}
-        >
-          ⬇️ Download CSV
-        </Btn>
-        <Btn
           onClick={async () => {
             try {
-              await navigator.clipboard.writeText(toTSV(rows));
+              await navigator.clipboard.writeText(text);
               setCopied(true);
-              setMsg("Copied. Open Blooket's spreadsheet template and paste into the first empty data row.");
+              setMsg("Copied. In Blooket: Create → Quizlet Import → paste into step 3 → Add Questions.");
             } catch (e) {
-              setMsg("Copy failed — use the download button instead.");
+              setMsg("Copy didn't work — download the file instead, then open it and copy from there.");
             }
           }}
         >
-          {copied ? "Copied ✓" : "📋 Copy for the template"}
+          {copied ? "Copied ✓" : "📋 Copy the word list"}
         </Btn>
+        <Btn onClick={() => downloadText(text, `${safeName}-words.txt`, "text/plain")}>⬇️ Download as text</Btn>
       </div>
       {msg && <p style={{ ...small, marginTop: 0 }}>{msg}</p>}
 
       <p style={{ ...small, fontSize: 12.5 }}>
-        Two ways in, if one gives you trouble: upload the CSV directly, or copy the rows and paste them into
-        Blooket's own template (Create → Spreadsheet Import → Copy), then download that as CSV. Check the Hebrew
-        looks right in Blooket before class — some sites render niqqud and right-to-left text imperfectly.
+        Blooket has its own "Flip questions and answers" tickbox on that screen — if the sides come out the wrong
+        way round, that's the switch to change, no need to re-export.
       </p>
 
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ borderTop: `1px solid ${T.line}`, marginTop: 4, paddingTop: 10 }}>
+        {!more ? (
+          <button onClick={() => setMore(true)} style={{ border: "none", background: "none", fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft, cursor: "pointer", textDecoration: "underline", padding: 0 }}>
+            I want ready-made multiple-choice questions instead
+          </button>
+        ) : (
+          <>
+            <p style={{ ...small, fontSize: 12.5, marginTop: 0 }}>
+              This makes a spreadsheet where each word already has four answer choices, for Blooket's
+              <strong> Spreadsheet Import</strong> instead. Use it if you'd rather Blooket didn't build the questions itself.
+            </p>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", gap: 7, alignItems: "center", fontFamily: uiFont, fontSize: 13.5, color: T.ink }}>
+                Seconds
+                <input
+                  type="number" min="5" max="300" value={seconds}
+                  onChange={(e) => setSeconds(Math.max(5, Math.min(300, parseInt(e.target.value, 10) || 20)))}
+                  style={{ width: 64, fontFamily: uiFont, fontSize: 13.5, padding: "5px 7px", border: `1.5px solid ${T.line}`, borderRadius: 8, outline: "none", color: T.ink, background: "#fff" }}
+                />
+              </label>
+              <Btn
+                disabled={cards.length < 2}
+                onClick={() => {
+                  const rows = buildBlooketRows(deck, dir === "en2he" ? "en2he" : "he2en", seconds);
+                  const ok = downloadText(toCSV(rows), `${safeName}-blooket.csv`, "text/csv");
+                  setMsg(ok ? "Downloaded. In Blooket: Create → Spreadsheet Import." : "Download blocked by the browser.");
+                }}
+              >
+                ⬇️ Download spreadsheet CSV
+              </Btn>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
         <Btn onClick={onClose}>Close</Btn>
       </div>
     </Modal>
