@@ -901,6 +901,20 @@ export default function App() {
       {modal?.type === "blooket" && deck && (
         <BlooketModal deck={deck} onClose={() => setModal(null)} />
       )}
+      {modal?.type === "fillTr" && deck && (
+        <FillTrModal
+          deck={deck}
+          onClose={() => setModal(null)}
+          onSave={(map) => {
+            update((d) => {
+              const dk = d.classes.find((c) => c.id === view.classId).decks.find((x) => x.id === view.deckId);
+              for (const c of dk.cards) if (map[c.id]) c.tr = map[c.id];
+              return d;
+            });
+            setModal(null);
+          }}
+        />
+      )}
       {modal?.type === "deckAction" && (
         <DeckActionModal
           mode={modal.mode}
@@ -1059,6 +1073,11 @@ export default function App() {
           {teacher && (
             <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <Btn onClick={() => setView({ page: "report", classId: view.classId, deckId: deck.id })}>📊 Report</Btn>
+              {deck.cards.some((c) => !(c.tr || "").trim()) && (
+                <Btn onClick={() => setModal({ type: "fillTr" })} title="Fill in missing transliterations for this whole deck">
+                  ✨ Transliterations
+                </Btn>
+              )}
               <Btn onClick={() => setModal({ type: "blooket" })} disabled={deck.cards.length < 2} title={deck.cards.length < 2 ? "Needs at least 2 cards" : "Export this deck for Blooket"}>⬇️ Blooket</Btn>
               <Btn onClick={() => setModal({ type: "bulkAdd" })}>📋 Bulk add</Btn>
               <Btn onClick={() => setModal({ type: "editCard" })}>+ Add card</Btn>
@@ -1328,6 +1347,11 @@ function StudyPage({ deck, accent = SHUK[0], speech, session, setSession, answer
                   </span>
                   {speech.supported && speech.voice && <SpeakerBtn text={current.he} voice={speech.voice} size={28} />}
                 </div>
+                {session.showTr && current.tr && (
+                  <span style={{ fontFamily: uiFont, fontSize: 15, fontStyle: "italic", color: T.inkSoft, marginTop: 6 }}>
+                    {current.tr}
+                  </span>
+                )}
               </>
             )}
           </CardFace>
@@ -2635,6 +2659,70 @@ function DeckActionModal({ mode, deck, classes, currentClassId, onClose, onConfi
           {copy ? "Make a copy" : "Move deck"}
         </Btn>
       </div>
+    </Modal>
+  );
+}
+
+function FillTrModal({ deck, onClose, onSave }) {
+  const [rows, setRows] = useState(() =>
+    deck.cards
+      .filter((c) => !(c.tr || "").trim())
+      .map((c) => {
+        const guess = transliterate(c.he);
+        return { id: c.id, he: c.he, en: c.en, tr: guess || "", stuck: !guess };
+      })
+  );
+  const stuck = rows.filter((r) => r.stuck && !r.tr.trim()).length;
+  const filled = rows.filter((r) => r.tr.trim()).length;
+  const small = { fontFamily: uiFont, fontSize: 13.5, color: T.inkSoft };
+
+  const setTr = (id, v) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, tr: v } : r)));
+
+  return (
+    <Modal title="Fill in transliterations" onClose={onClose}>
+      <p style={{ ...small, marginTop: 0 }}>
+        {rows.length} card{rows.length === 1 ? "" : "s"} in <strong style={{ color: T.ink, fontWeight: 600 }}>{deck.name}</strong> had none.
+        Read from the niqqud — edit anything that looks off, then save.
+      </p>
+      {stuck > 0 && (
+        <p style={{ ...small, color: T.pom }}>
+          {stuck} couldn't be read because the Hebrew has no niqqud. Add vowel points to those cards, or type the transliteration here.
+        </p>
+      )}
+      <div style={{ maxHeight: 260, overflowY: "auto", border: `1.5px solid ${T.line}`, borderRadius: 10, margin: "10px 0" }}>
+        {rows.map((r, i) => (
+          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", flexWrap: "wrap", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
+            <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 19, color: T.ink, minWidth: 84, textAlign: "right" }}>{r.he}</span>
+            <span style={{ fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft, minWidth: 70, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.en}</span>
+            <input
+              value={r.tr}
+              onChange={(e) => setTr(r.id, e.target.value)}
+              placeholder={r.stuck ? "needs niqqud…" : "translit…"}
+              style={{
+                flex: 1, minWidth: 100, fontFamily: uiFont, fontSize: 13.5, fontStyle: "italic", padding: "6px 8px",
+                border: `1.5px solid ${r.tr.trim() ? T.line : T.pomSoft}`, borderRadius: 8, background: "#fff", color: T.ink, outline: "none",
+              }}
+            />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn
+          kind="primary"
+          disabled={!filled}
+          onClick={() => {
+            const map = {};
+            for (const r of rows) if (r.tr.trim()) map[r.id] = r.tr.trim();
+            onSave(map);
+          }}
+        >
+          Save {filled} transliteration{filled === 1 ? "" : "s"}
+        </Btn>
+      </div>
+      <p style={{ ...small, fontSize: 12, marginBottom: 0 }}>
+        Cards left blank are skipped — nothing else about them changes.
+      </p>
     </Modal>
   );
 }
