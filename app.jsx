@@ -164,6 +164,89 @@ function shuffleArr(arr) {
   return a;
 }
 
+/* ---------- transliteration (rule-based, offline) ---------- */
+/* Works off the niqqud, so it's a calculation rather than a guess. Two known
+   soft spots: qamats qatan (כָּל reads "kal", should be "kol") and shva na in
+   the middle of a word — both need the teacher's eye. */
+
+const HEB_LET = /[\u05D0-\u05EA]/;
+const HEB_NIQ = /[\u05B0-\u05BC\u05C1\u05C2\u05C7]/;
+const M_DAGESH = "\u05BC", M_SHVA = "\u05B0", M_SIN = "\u05C2";
+const M_HOLAM = "\u05B9", M_HOLAM_V = "\u05BA", M_PATAH = "\u05B7";
+const VOWEL_SOUND = {
+  "\u05B1": "e", "\u05B2": "a", "\u05B3": "o", "\u05B4": "i", "\u05B5": "e",
+  "\u05B6": "e", "\u05B7": "a", "\u05B8": "a", "\u05B9": "o", "\u05BA": "o",
+  "\u05BB": "u", "\u05C7": "o",
+};
+
+function consonantSound(t, dagesh) {
+  switch (t.c) {
+    case "א": case "ע": return "";
+    case "ב": return dagesh ? "b" : "v";
+    case "ג": return "g";
+    case "ד": return "d";
+    case "ה": return "h";
+    case "ו": return "v";
+    case "ז": return "z";
+    case "ח": return "ch";
+    case "ט": return "t";
+    case "י": return "y";
+    case "כ": case "ך": return dagesh ? "k" : "ch";
+    case "ל": return "l";
+    case "מ": case "ם": return "m";
+    case "נ": case "ן": return "n";
+    case "ס": return "s";
+    case "פ": case "ף": return dagesh ? "p" : "f";
+    case "צ": case "ץ": return "tz";
+    case "ק": return "k";
+    case "ר": return "r";
+    case "ש": return t.m.includes(M_SIN) ? "s" : "sh";
+    case "ת": return "t";
+    default: return "";
+  }
+}
+
+function transliterate(word) {
+  const T = [];
+  for (const ch of word || "") {
+    if (HEB_LET.test(ch)) T.push({ c: ch, m: [] });
+    else if (HEB_NIQ.test(ch) && T.length) T[T.length - 1].m.push(ch);
+  }
+  if (!T.length) return null;
+  const pointed = T.some((t) => t.m.some((m) => VOWEL_SOUND[m] || m === M_SHVA));
+  if (!pointed) return null; // no niqqud — the vowels simply aren't there to read
+
+  let out = "";
+  for (let i = 0; i < T.length; i++) {
+    const t = T[i], prev = T[i - 1];
+    const dagesh = t.m.includes(M_DAGESH);
+    const vm = t.m.find((m) => VOWEL_SOUND[m]);
+    const shva = t.m.includes(M_SHVA);
+    const last = i === T.length - 1;
+    const prevVowel = prev && prev.m.find((m) => VOWEL_SOUND[m]);
+
+    // vav carrying a vowel: וֹ = o, וּ = u
+    if (t.c === "ו" && prev && !prevVowel) {
+      if (t.m.includes(M_HOLAM) || t.m.includes(M_HOLAM_V)) { out += "o"; continue; }
+      if (dagesh && !vm) { out += "u"; continue; }
+    }
+    // yod that just spells out an i/e vowel
+    if (t.c === "י" && !vm && !shva && prevVowel &&
+        (VOWEL_SOUND[prevVowel] === "i" || VOWEL_SOUND[prevVowel] === "e")) continue;
+    // patah genuva — the vowel is said before the letter (רוּחַ = ruach)
+    if (last && t.m.includes(M_PATAH) && ["ע", "ח", "ה"].includes(t.c)) {
+      out += t.c === "ע" ? "'a" : t.c === "ח" ? "ach" : "ah";
+      continue;
+    }
+    if (last && t.c === "ה" && !vm && !dagesh) continue; // silent final he
+
+    out += consonantSound(t, dagesh);
+    if (vm) out += VOWEL_SOUND[vm];
+    else if (shva && (i === 0 || (prev && prev.m.includes(M_SHVA)))) out += "e";
+  }
+  return out.replace(/^'+/, "") || null;
+}
+
 /* ---------- lookups: translation + pictures (both free, no API key) ---------- */
 
 // niqqud confuses machine translation, so send the bare letters
@@ -2257,6 +2340,7 @@ function CardModal({ card, onSave, onClose }) {
   const [imgOk, setImgOk] = useState(true);
   const [tBusy, setTBusy] = useState(false);
   const [tErr, setTErr] = useState("");
+  const [trNote, setTrNote] = useState("");
 
   const suggest = async () => {
     if (!he.trim()) return;
@@ -2282,6 +2366,22 @@ function CardModal({ card, onSave, onClose }) {
         </span>
       </div>
       <Field label="Transliteration (optional)" value={tr} onChange={setTr} placeholder="shalom" />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: -6, marginBottom: 12, flexWrap: "wrap" }}>
+        <Btn
+          onClick={() => {
+            const t = transliterate(he);
+            if (t) { setTr(t); setTrNote(""); }
+            else setTrNote("Add niqqud to the Hebrew first — without vowel points there's no way to know how it sounds.");
+          }}
+          disabled={!he.trim()}
+          style={{ fontSize: 13, padding: "7px 12px" }}
+        >
+          ✨ Suggest transliteration
+        </Btn>
+        <span style={{ fontFamily: uiFont, fontSize: 12, color: trNote ? T.pom : T.inkSoft }}>
+          {trNote || "Read straight from the niqqud."}
+        </span>
+      </div>
       <Field
         label="Picture link (optional)"
         value={img}
@@ -2370,6 +2470,27 @@ function BulkAddModal({ onSave, onClose }) {
   };
 
   const setRowEn = (i, v) => setRows((rs) => rs.map((r, x) => (x === i ? { ...r, en: v } : r)));
+  const setRowTr = (i, v) => setRows((rs) => rs.map((r, x) => (x === i ? { ...r, tr: v } : r)));
+  const missingTr = rows.filter((r) => !r.tr).length;
+
+  const fillTranslit = () => {
+    let done = 0, stuck = 0;
+    setRows((rs) =>
+      rs.map((r) => {
+        if (r.tr) return r;
+        const t = transliterate(r.he);
+        if (t) { done++; return { ...r, tr: t }; }
+        stuck++;
+        return r;
+      })
+    );
+    setNote(
+      stuck
+        ? `${done} filled in. ${stuck} need niqqud on the Hebrew before they can be read.`
+        : `${done} transliteration${done === 1 ? "" : "s"} filled in — check them below.`
+    );
+  };
+
   const ready = rows.filter((r) => r.he.trim() && r.en.trim());
 
   const small = { fontFamily: uiFont, fontSize: 13, color: T.inkSoft };
@@ -2399,19 +2520,33 @@ function BulkAddModal({ onSave, onClose }) {
                 {busy ? progress || "Translating…" : `✨ Suggest English for ${missing}`}
               </Btn>
             )}
+            {missingTr > 0 && (
+              <Btn onClick={fillTranslit} disabled={busy} style={{ fontSize: 13, padding: "7px 12px" }}>
+                ✨ Transliterate {missingTr}
+              </Btn>
+            )}
           </div>
           {note && <p style={{ ...small, marginTop: 0 }}>{note}</p>}
-          <div style={{ maxHeight: 200, overflowY: "auto", border: `1.5px solid ${T.line}`, borderRadius: 10, marginBottom: 10 }}>
+          <div style={{ maxHeight: 210, overflowY: "auto", border: `1.5px solid ${T.line}`, borderRadius: 10, marginBottom: 10 }}>
             {rows.map((r, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
-                <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 19, color: T.ink, minWidth: 90, textAlign: "right" }}>{r.he}</span>
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", flexWrap: "wrap", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
+                <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 19, color: T.ink, minWidth: 84, textAlign: "right" }}>{r.he}</span>
                 <input
                   value={r.en}
                   onChange={(e) => setRowEn(i, e.target.value)}
                   placeholder="English…"
                   style={{
-                    flex: 1, minWidth: 0, fontFamily: uiFont, fontSize: 14, padding: "6px 8px",
+                    flex: 2, minWidth: 110, fontFamily: uiFont, fontSize: 14, padding: "6px 8px",
                     border: `1.5px solid ${r.en.trim() ? T.line : T.pomSoft}`, borderRadius: 8, background: "#fff", color: T.ink, outline: "none",
+                  }}
+                />
+                <input
+                  value={r.tr}
+                  onChange={(e) => setRowTr(i, e.target.value)}
+                  placeholder="translit…"
+                  style={{
+                    flex: 1, minWidth: 90, fontFamily: uiFont, fontSize: 13, fontStyle: "italic", padding: "6px 8px",
+                    border: `1.5px solid ${T.line}`, borderRadius: 8, background: "#fff", color: T.inkSoft, outline: "none",
                   }}
                 />
               </div>
