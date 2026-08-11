@@ -489,6 +489,9 @@ const SHUK = [
 const shukFor = (i) => SHUK[((i % SHUK.length) + SHUK.length) % SHUK.length];
 
 const HEB_ORDER = "אבגדהוזחטיכלמנסעפצקרשת";
+
+/* draft decks are visible to the signed-in teacher only */
+const decksFor = (cls, teacher) => (teacher ? cls.decks : cls.decks.filter((d) => !d.draft));
 const firstHebrewChar = (str) => {
   for (const ch of str || "") if (ch >= "\u05D0" && ch <= "\u05EA") return ch;
   return null;
@@ -858,12 +861,17 @@ export default function App() {
           title={modal.deck ? "Rename deck" : "New deck"}
           initial={modal.deck?.name || ""}
           placeholder="e.g. Unit 4 Food Words"
+          showDraft
+          draft={modal.deck ? !!modal.deck.draft : true}
           onClose={() => setModal(null)}
-          onSave={(name) => {
+          onSave={(name, isDraft) => {
             update((d) => {
               const c = d.classes.find((c) => c.id === view.classId);
-              if (modal.deck) c.decks.find((x) => x.id === modal.deck.id).name = name;
-              else c.decks.push({ id: uid(), name, cards: [] });
+              if (modal.deck) {
+                const dk = c.decks.find((x) => x.id === modal.deck.id);
+                dk.name = name;
+                dk.draft = isDraft;
+              } else c.decks.push({ id: uid(), name, cards: [], draft: isDraft });
               return d;
             });
             setModal(null);
@@ -938,6 +946,7 @@ export default function App() {
                 to.decks.push({
                   id: uid(),
                   name: newName,
+                  draft: true,
                   cards: src.cards.map((c) => ({ ...c, id: uid() })),
                 });
               }
@@ -978,11 +987,16 @@ export default function App() {
           sub={teacher ? "You're in teacher mode — tap ✎ to rename, or add a new class below." : "Tap your class to find your flashcards."}
         />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-          {data.classes.map((c, i) => (
+          {data.classes.map((c, i) => ({ c, i })).filter(({ c }) => teacher || decksFor(c, false).length > 0).map(({ c, i }) => (
             <FolderCard
               key={c.id}
               title={c.name}
-              meta={`${c.decks.length} deck${c.decks.length === 1 ? "" : "s"}`}
+              meta={(() => {
+                const live = decksFor(c, false).length;
+                const drafts = c.decks.length - live;
+                if (!teacher) return `${live} deck${live === 1 ? "" : "s"}`;
+                return `${live} deck${live === 1 ? "" : "s"}${drafts ? ` · ${drafts} draft` : ""}`;
+              })()}
               color={shukFor(i)}
               badge={HEB_ORDER[i % HEB_ORDER.length]}
               onOpen={() => setView({ page: "decks", classId: c.id })}
@@ -1020,10 +1034,11 @@ export default function App() {
       <div>
         <PageIntro eyebrow={cls.name} color={color.main} title="Choose a deck" sub={teacher ? "Tap ✎ to rename a deck, or add a new one." : "Each deck is one set of words to practice."} />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-          {cls.decks.map((dk) => (
+          {decksFor(cls, teacher).map((dk) => (
             <FolderCard
               key={dk.id}
               title={dk.name}
+              draft={!!dk.draft}
               meta={`${dk.cards.length} card${dk.cards.length === 1 ? "" : "s"}`}
               color={color}
               letter={deckLetter(dk)}
@@ -1057,6 +1072,45 @@ export default function App() {
     return (
       <div>
         <PageIntro eyebrow="Deck" color={color.main} title={deck.name} sub={`${deck.cards.length} card${deck.cards.length === 1 ? "" : "s"}`} />
+        {teacher && (deck.draft ? (
+          <div style={{
+            display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap",
+            background: "#FBF0DD", border: "1.5px solid #EBD3A6", borderRadius: 12,
+            padding: "12px 16px", marginBottom: 20, fontFamily: uiFont,
+          }}>
+            <span style={{ fontSize: 14, color: "#6B4E0F", flex: 1, minWidth: 200 }}>
+              <strong>✏️ Draft.</strong> Students can't see this deck yet — build it at your own pace.
+            </span>
+            <Btn
+              kind="primary"
+              onClick={() =>
+                update((d) => {
+                  const dk = d.classes.find((c) => c.id === view.classId).decks.find((x) => x.id === deck.id);
+                  dk.draft = false;
+                  return d;
+                })
+              }
+            >
+              Publish to students
+            </Btn>
+          </div>
+        ) : (
+          <p style={{ fontFamily: uiFont, fontSize: 13, color: T.inkSoft, marginTop: -12, marginBottom: 20 }}>
+            ● Visible to students ·{" "}
+            <button
+              onClick={() =>
+                update((d) => {
+                  const dk = d.classes.find((c) => c.id === view.classId).decks.find((x) => x.id === deck.id);
+                  dk.draft = true;
+                  return d;
+                })
+              }
+              style={{ border: "none", background: "none", fontFamily: uiFont, fontSize: 13, color: T.inkSoft, cursor: "pointer", textDecoration: "underline", padding: 0 }}
+            >
+              hide it again
+            </button>
+          </p>
+        ))}
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 28 }}>
           <Btn
             kind="primary"
@@ -2192,7 +2246,7 @@ function PageIntro({ eyebrow, title, sub, color }) {
   );
 }
 
-function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, onDuplicate, onMove, color = SHUK[0], letter, badge }) {
+function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, onDuplicate, onMove, color = SHUK[0], letter, badge, draft }) {
   return (
     <div
       style={{
@@ -2234,6 +2288,15 @@ function FolderCard({ title, meta, onOpen, teacher, onEdit, onDelete, onDuplicat
         <Thread width={40} colors={[color.main]} />
       </div>
       <h3 style={{ fontFamily: uiFont, fontSize: 17, fontWeight: 600, color: T.ink, margin: "10px 0 4px", position: "relative" }}>{title}</h3>
+      {draft && (
+        <span style={{
+          display: "inline-block", fontFamily: uiFont, fontSize: 11, fontWeight: 600, letterSpacing: "0.04em",
+          textTransform: "uppercase", color: "#8A5208", background: "#FBF0DD", border: "1px solid #EBD3A6",
+          borderRadius: 999, padding: "2px 8px", marginBottom: 4, position: "relative",
+        }}>
+          ✏️ Draft
+        </span>
+      )}
       <p style={{ fontFamily: uiFont, fontSize: 13, color: color.dark, margin: 0, position: "relative" }}>{meta}</p>
       {teacher && (
         <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
@@ -2283,14 +2346,28 @@ function IconBtn({ children, onClick, label, danger }) {
 
 /* ---------- modals ---------- */
 
-function NameModal({ title, initial, placeholder, onSave, onClose }) {
+function NameModal({ title, initial, placeholder, onSave, onClose, showDraft, draft }) {
   const [name, setName] = useState(initial);
+  const [isDraft, setIsDraft] = useState(!!draft);
   return (
     <Modal title={title} onClose={onClose}>
       <Field label="Name" value={name} onChange={setName} placeholder={placeholder} autoFocus />
+      {showDraft && (
+        <>
+          <label style={{ display: "flex", gap: 9, alignItems: "flex-start", cursor: "pointer", marginBottom: 10 }}>
+            <input type="checkbox" checked={isDraft} onChange={(e) => setIsDraft(e.target.checked)} style={{ width: 16, height: 16, marginTop: 2, accentColor: T.blue }} />
+            <span>
+              <span style={{ fontFamily: uiFont, fontSize: 14.5, color: T.ink }}>Keep as a draft</span>
+              <span style={{ display: "block", fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft }}>
+                Only you can see it. Publish when it's ready for students.
+              </span>
+            </span>
+          </label>
+        </>
+      )}
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
         <Btn onClick={onClose}>Cancel</Btn>
-        <Btn kind="primary" disabled={!name.trim()} onClick={() => onSave(name.trim())}>Save</Btn>
+        <Btn kind="primary" disabled={!name.trim()} onClick={() => onSave(name.trim(), isDraft)}>Save</Btn>
       </div>
     </Modal>
   );
@@ -2649,7 +2726,7 @@ function DeckActionModal({ mode, deck, classes, currentClassId, onClose, onConfi
 
       <p style={{ ...small, fontSize: 12.5 }}>
         {copy
-          ? "The copy is a separate deck: it starts with an empty report, and editing it later won't change the original."
+          ? "The copy is a separate deck: it starts as a draft with an empty report, and editing it later won't change the original."
           : "The deck keeps its cards and its report history — only the class it sits in changes."}
       </p>
 
