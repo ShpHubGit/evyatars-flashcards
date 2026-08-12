@@ -2228,6 +2228,9 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
   const [messages, setMessages] = useState([]);
   const [chips, setChips] = useState([]);
   const [typing, setTyping] = useState(false);
+  const [entry, setEntry] = useState(null); // null = tap chips · string = typing a Hebrew answer
+  const [kb, setKb] = useState(() => typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  const entryRef = useRef(null);
   const s = useRef({ phase: "menu" }).current;
   const scrollRef = useRef(null);
   const timers = useRef([]);
@@ -2237,13 +2240,14 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, typing, chips]);
+  }, [messages, typing, chips, entry]);
 
   const push = (msg) => setMessages((m) => [...m, { id: uid(), ...msg }]);
   const meSay = (text) => push({ from: "me", kind: "text", text });
 
-  const botSay = (items, thenChips) => {
+  const botSay = (items, thenChips, thenEntry) => {
     setChips([]);
+    setEntry(null);
     // typing time scales with message length, like a real person typing — capped so quizzes stay playable
     const typeTime = (it) =>
       it.kind === "text" ? Math.min(2000, Math.max(750, 450 + (it.text?.length || 0) * 32)) : 900;
@@ -2256,7 +2260,10 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
           setTyping(false);
           push({ from: "bot", ...it });
           if (it.speak && speech.voice) speakHebrew(it.speak, speech.voice);
-          if (idx === items.length - 1) setChips(thenChips || []);
+          if (idx === items.length - 1) {
+            setChips(thenChips || []);
+            if (thenEntry) setEntry("");
+          }
         }, delay + dur)
       );
       delay += dur + 280;
@@ -2269,6 +2276,7 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
     const c = [{ label: "🃏 Flashcards", onTap: () => { meSay("Flashcards"); startFlash(); } }];
     if (canQuiz) c.push({ label: "📖 Reading quiz", onTap: () => { meSay("Reading quiz"); startQuiz("read"); } });
     if (canQuiz && hasVoice) c.push({ label: "🎧 Listening quiz", onTap: () => { meSay("Listening quiz"); startQuiz("listen"); } });
+    c.push({ label: "⌨️ Writing", onTap: () => { meSay("Writing"); startWrite(); } });
     c.push(byeChip);
     return c;
   };
@@ -2385,6 +2393,69 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
     }
   };
 
+  /* ----- writing flow ----- */
+  const startWrite = () => {
+    s.phase = "write";
+    s.wq = shuffleArr(deck.cards);
+    s.wi = 0; s.wscore = 0; s.wstreak = 0; s.wwords = []; s.wtry = 0;
+    askWrite([{ kind: "text", text: "Write each word in Hebrew ⌨️ — no vowel points needed." }]);
+  };
+
+  const askWrite = (pre) => {
+    const card = s.wq[s.wi];
+    s.wtry = 0;
+    botSay([...pre, { kind: "prompt", en: card.en, label: `${s.wi + 1} of ${s.wq.length}` }], [], true);
+  };
+
+  const finishWrite = (pre) => {
+    s.wi++;
+    if (s.wi < s.wq.length) { askWrite(pre); return; }
+    logResult(deck.id, { type: "quiz", mode: "write", total: s.wq.length, score: s.wscore, words: s.wwords, via: "chat" });
+    const ratio = s.wscore / s.wq.length;
+    const line =
+      ratio === 1 ? `🌟 ${s.wscore}/${s.wq.length} — every word spelled right!`
+      : ratio >= 0.8 ? `🎉 ${s.wscore}/${s.wq.length} first try — kol hakavod!`
+      : ratio >= 0.6 ? `💪 ${s.wscore}/${s.wq.length} first try — getting there!`
+      : `🌱 ${s.wscore}/${s.wq.length} first try — writing is the hard one, keep at it.`;
+    s.phase = "menu";
+    botSay([...pre, { kind: "text", text: line }, { kind: "text", text: "What next?" }], menuChips());
+  };
+
+  const sendWritten = () => {
+    const val = (entry || "").trim();
+    if (!val || s.phase !== "write") return;
+    const card = s.wq[s.wi];
+    meSay(val);
+    setEntry(null);
+    const r = compareAnswer(val, card.he);
+    const firstTry = s.wtry === 0;
+    if (r === "right") {
+      if (firstTry) { s.wscore++; s.wstreak++; } else s.wstreak = 0;
+      s.wwords.push({ cardId: card.id, right: firstTry });
+      finishWrite([{ kind: "text", text: firstTry && s.wstreak >= 3 ? `✓ Yes! 🔥 ${s.wstreak} in a row!` : "✓ Yes!" }]);
+    } else if (r === "close" && firstTry) {
+      s.wtry = 1; s.wstreak = 0;
+      botSay([{ kind: "text", text: "So close — one letter is off. Have another go 🙂" }], [], true);
+    } else if (r === "close") {
+      s.wstreak = 0;
+      s.wwords.push({ cardId: card.id, right: false });
+      finishWrite([{ kind: "text", text: "Almost — this is how we spell it:" }, { kind: "word", he: card.he, small: true }]);
+    } else {
+      s.wstreak = 0;
+      s.wwords.push({ cardId: card.id, right: false });
+      finishWrite([{ kind: "text", text: "Not quite — the word is:" }, { kind: "word", he: card.he, small: true }]);
+    }
+  };
+
+  const writeHint = () => {
+    if (s.phase !== "write") return;
+    const card = s.wq[s.wi];
+    push({
+      from: "bot", kind: "text",
+      text: `Starts with ${bareLetters(card.he)[0]}${card.tr ? ` · sounds like "${card.tr}"` : ""}`,
+    });
+  };
+
   /* ----- render ----- */
   return (
     <div style={{ maxWidth: 440, margin: "0 auto", fontFamily: uiFont }}>
@@ -2405,20 +2476,69 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
           ))}
           {typing && <TypingBubble />}
         </div>
+        {entry !== null && kb && (
+          <div style={{ borderTop: `1px solid ${T.line}`, background: "#F2EFE7", padding: 6 }}>
+            {KB_ROWS.map((row, ri) => (
+              <div key={ri} style={{ display: "flex", gap: 3, justifyContent: "center", marginBottom: 3 }}>
+                {row.map((ch) => (
+                  <button key={ch} onClick={() => setEntry((t) => (t || "") + ch)}
+                    style={{ flex: "1 1 0", minWidth: 0, maxWidth: 38, height: 36, fontFamily: heFont, fontSize: 18, color: T.ink, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 7, cursor: "pointer" }}>
+                    {ch}
+                  </button>
+                ))}
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 3, justifyContent: "center" }}>
+              <button onClick={() => setEntry((t) => (t || "") + " ")} style={{ flex: 3, height: 36, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 7, cursor: "pointer", fontFamily: uiFont, fontSize: 12, color: T.inkSoft }}>space</button>
+              <button onClick={() => setEntry((t) => (t || "").slice(0, -1))} style={{ flex: 1, height: 36, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 7, cursor: "pointer", fontSize: 15 }}>⌫</button>
+            </div>
+          </div>
+        )}
         <div style={{ borderTop: `1px solid ${T.line}`, padding: "10px 12px", display: "flex", gap: 8, flexWrap: "wrap", background: "#FBFAF6", minHeight: 56, alignItems: "center" }}>
-          {chips.map((c, i) => (
-            <button
-              key={i}
-              onClick={() => { setChips([]); c.onTap(); }}
-              style={{ fontFamily: uiFont, fontSize: 14, fontWeight: 500, padding: "9px 14px", borderRadius: 999, border: `1.5px solid ${accent.main}`, background: "#fff", color: accent.dark, cursor: "pointer" }}
-            >
-              {c.label}
-            </button>
-          ))}
-          {chips.length === 0 && <span style={{ fontSize: 12.5, color: T.inkSoft }}>…</span>}
+          {entry !== null ? (
+            <>
+              <button onClick={() => setKb((k) => !k)} aria-label="Hebrew keyboard"
+                style={{ width: 38, height: 38, borderRadius: 999, border: `1.5px solid ${kb ? accent.main : T.line}`, background: kb ? accent.soft : "#fff", color: accent.dark, cursor: "pointer", fontSize: 15, flexShrink: 0 }}>
+                ⌨️
+              </button>
+              <input
+                ref={entryRef}
+                dir="rtl"
+                lang="he"
+                value={entry}
+                onChange={(e) => setEntry(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendWritten(); } }}
+                placeholder="…"
+                style={{ flex: 1, minWidth: 90, fontFamily: heFont, fontSize: 20, padding: "7px 11px", border: `1.5px solid ${T.line}`, borderRadius: 999, background: "#fff", color: T.ink, outline: "none", textAlign: "right" }}
+              />
+              <button onClick={writeHint} aria-label="Hint"
+                style={{ width: 38, height: 38, borderRadius: 999, border: `1.5px solid ${T.line}`, background: "#fff", cursor: "pointer", fontSize: 15, flexShrink: 0 }}>
+                💡
+              </button>
+              <button onClick={sendWritten} disabled={!entry.trim()} aria-label="Send"
+                style={{ width: 38, height: 38, borderRadius: 999, border: "none", background: entry.trim() ? accent.main : T.line, color: "#fff", cursor: entry.trim() ? "pointer" : "default", fontSize: 16, flexShrink: 0 }}>
+                ↑
+              </button>
+            </>
+          ) : (
+            <>
+              {chips.map((c, i) => (
+                <button
+                  key={i}
+                  onClick={() => { setChips([]); c.onTap(); }}
+                  style={{ fontFamily: uiFont, fontSize: 14, fontWeight: 500, padding: "9px 14px", borderRadius: 999, border: `1.5px solid ${accent.main}`, background: "#fff", color: accent.dark, cursor: "pointer" }}
+                >
+                  {c.label}
+                </button>
+              ))}
+              {chips.length === 0 && <span style={{ fontSize: 12.5, color: T.inkSoft }}>…</span>}
+            </>
+          )}
         </div>
       </div>
-      <p style={{ textAlign: "center", fontSize: 12, color: T.inkSoft, marginTop: 10 }}>Tap a reply to answer — no typing needed.</p>
+      <p style={{ textAlign: "center", fontSize: 12, color: T.inkSoft, marginTop: 10 }}>
+        {entry !== null ? "Type the Hebrew, or tap ⌨️ for a Hebrew keyboard." : "Tap a reply to answer — no typing needed."}
+      </p>
     </div>
   );
 }
@@ -2442,6 +2562,14 @@ function Bubble({ m, accent, voice, hasVoice }) {
         style={{ alignSelf: "flex-start", maxWidth: "60%", maxHeight: 140, borderRadius: 18, borderBottomLeftRadius: 6, objectFit: "cover" }}
         onError={(e) => { e.currentTarget.style.display = "none"; }}
       />
+    );
+  if (m.kind === "prompt")
+    return (
+      <div style={base}>
+        {m.label && <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 2 }}>{m.label}</div>}
+        <div style={{ fontSize: 21, fontWeight: 500, color: T.ink }}>{m.en}</div>
+        <div style={{ fontSize: 11.5, color: T.inkSoft, marginTop: 2 }}>write it in Hebrew</div>
+      </div>
     );
   if (m.kind === "word")
     return (
@@ -2472,7 +2600,12 @@ function Bubble({ m, accent, voice, hasVoice }) {
         </span>
       </div>
     );
-  return <div style={base}>{m.text}</div>;
+  const heb = /[\u05D0-\u05EA]/.test(m.text || "");
+  return (
+    <div dir={heb ? "rtl" : undefined} style={heb ? { ...base, fontFamily: heFont, fontSize: 20 } : base}>
+      {m.text}
+    </div>
+  );
 }
 
 function TypingBubble() {
