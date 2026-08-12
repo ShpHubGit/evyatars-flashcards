@@ -192,6 +192,42 @@ function shuffleArr(arr) {
   return a;
 }
 
+/* ---------- typed-answer checking ---------- */
+
+const FINAL_FORMS = { "ך": "כ", "ם": "מ", "ן": "נ", "ף": "פ", "ץ": "צ" };
+const bareLetters = (s) =>
+  stripNiqqud(s || "").replace(/[^\u05D0-\u05EA\s]/g, "").replace(/\s+/g, " ").trim();
+const unfinal = (s) => s.replace(/[ךםןףץ]/g, (c) => FINAL_FORMS[c]);
+const skeleton = (s) => unfinal(s).replace(/[וי]/g, "");
+
+/* Cards store pointed Hebrew; students type without vowels, and unvowelled Hebrew
+   normally adds ו/י (כתיב מלא). So a difference of only those letters — or of a
+   final-letter form — is a spelling slip, not a wrong answer. */
+/* Unvowelled Hebrew writes a ו where the pointed form has holam haser or qubuts —
+   אָדֹם is correctly written אדום. Build that form so students aren't marked down
+   for spelling it the way they're taught to. */
+function maleSpelling(word) {
+  let out = "";
+  for (const ch of word || "") {
+    if (HEB_LET.test(ch) || ch === " ") out += ch;
+    else if (ch === "\u05B9" && !out.endsWith("ו")) out += "ו"; // holam haser
+    else if (ch === "\u05BB") out += "ו";                        // qubuts
+  }
+  return out;
+}
+
+function compareAnswer(typed, correct) {
+  const a = bareLetters(typed);
+  if (!a) return "empty";
+  const forms = [bareLetters(correct), bareLetters(maleSpelling(correct))];
+  if (forms.includes(a)) return "right";
+  for (const b of forms) {
+    if (unfinal(a) === unfinal(b)) return "close";
+    if (skeleton(a) === skeleton(b) && Math.abs(a.length - b.length) <= 2) return "close";
+  }
+  return "wrong";
+}
+
 /* ---------- transliteration (rule-based, offline) ---------- */
 /* Works off the niqqud, so it's a calculation rather than a guess. Two known
    soft spots: qamats qatan (כָּל reads "kal", should be "kol") and shva na in
@@ -896,6 +932,15 @@ export default function App() {
           onExit={() => setView({ page: "deck", classId: view.classId, deckId: view.deckId })}
         />
       )}
+      {view.page === "write" && deck && (
+        <WritePage
+          key={deck.id}
+          deck={deck}
+          accent={clsColor}
+          speech={speech}
+          onExit={() => setView({ page: "deck", classId: view.classId, deckId: view.deckId })}
+        />
+      )}
       {view.page === "chat" && deck && (
         <ChatPage
           key={deck.id}
@@ -1233,6 +1278,12 @@ export default function App() {
               onClick={() => startSession(deck, shuffle, "speak")}
             >
               🗣️ Speaking practice
+            </Btn>
+            <Btn
+              disabled={deck.cards.length === 0}
+              onClick={() => setView({ page: "write", classId: view.classId, deckId: deck.id })}
+            >
+              ⌨️ Writing practice
             </Btn>
             <Btn
               disabled={deck.cards.length === 0}
@@ -1737,6 +1788,228 @@ function QuizPage({ deck, accent = SHUK[0], mode, speech, onExit }) {
   );
 }
 
+/* ---------- writing practice (English prompt → type the Hebrew) ---------- */
+
+const KB_ROWS = [
+  ["ק", "ר", "א", "ט", "ו", "ן", "ם", "פ"],
+  ["ש", "ד", "ג", "כ", "ע", "י", "ח", "ל", "ך", "ף"],
+  ["ז", "ס", "ב", "ה", "נ", "מ", "צ", "ת", "ץ"],
+];
+
+function WritePage({ deck, accent = SHUK[0], speech, onExit }) {
+  const [queue, setQueue] = useState(() => shuffleArr(deck.cards));
+  const [index, setIndex] = useState(0);
+  const [typed, setTyped] = useState("");
+  const [phase, setPhase] = useState("typing"); // typing | retry | right | close | wrong
+  const [score, setScore] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [missed, setMissed] = useState([]);
+  const [slips, setSlips] = useState([]);
+  const [words, setWords] = useState([]);
+  const [hint, setHint] = useState(null);
+  const [kb, setKb] = useState(() => typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  const loggedRef = useRef(false);
+  const inputRef = useRef(null);
+
+  const done = index >= queue.length;
+  const card = done ? null : queue[index];
+
+  useEffect(() => {
+    if (done && !loggedRef.current && words.length) {
+      loggedRef.current = true;
+      logResult(deck.id, { type: "quiz", mode: "write", total: queue.length, score, words });
+    }
+  }, [done]);
+
+  useEffect(() => { if (inputRef.current && phase !== "right") inputRef.current.focus(); }, [index, phase]);
+
+  const settle = (kind, firstTry) => {
+    setPhase(kind);
+    setWords((w) => [...w, { cardId: card.id, right: kind === "right" && firstTry }]);
+    if (kind === "right" && firstTry) { setScore((s) => s + 1); setStreak((s) => s + 1); }
+    else setStreak(0);
+    if (kind === "wrong") setMissed((m) => [...m, card]);
+    if (kind === "close") setSlips((s) => [...s, { card, typed }]);
+  };
+
+  const check = () => {
+    const r = compareAnswer(typed, card.he);
+    if (r === "empty") return;
+    const firstTry = phase === "typing";
+    if (r === "right") settle("right", firstTry);
+    else if (r === "close" && firstTry) setPhase("retry"); // one nudge before revealing
+    else if (r === "close") settle("close", false);
+    else settle("wrong", false);
+  };
+
+  const next = () => { setTyped(""); setHint(null); setPhase("typing"); setIndex((i) => i + 1); };
+  const type = (ch) => { setTyped((t) => t + ch); setPhase((p) => (p === "retry" ? "typing" : p)); };
+  const back = () => setTyped((t) => t.slice(0, -1));
+
+  if (done) {
+    const perfect = score === queue.length;
+    return (
+      <div style={{ maxWidth: 500, margin: "40px auto", textAlign: "center", fontFamily: uiFont }}>
+        {perfect && <LetterConfetti />}
+        <div style={{ fontSize: 44, marginBottom: 6, animation: "otiyot-pop 0.5s ease" }}>{perfect ? "🌟" : score / queue.length >= 0.6 ? "💪" : "🌱"}</div>
+        <h2 style={{ color: T.ink, fontSize: 24, margin: "0 0 6px" }}>
+          {score} / {queue.length} spelled right first try
+        </h2>
+        {slips.length > 0 && (
+          <>
+            <p style={{ color: T.inkSoft, fontSize: 14.5, marginBottom: 6 }}>Close — just the spelling:</p>
+            <div style={{ border: `1.5px solid #EBD3A6`, background: "#FBF0DD", borderRadius: 14, textAlign: "left", marginBottom: 14 }}>
+              {slips.map((s, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", borderTop: i === 0 ? "none" : "1px solid #EBD3A6", flexWrap: "wrap" }}>
+                  <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 20, color: "#6B4E0F", textDecoration: "line-through", opacity: 0.7 }}>{s.typed}</span>
+                  <span style={{ color: "#8A5208" }}>→</span>
+                  <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 21, color: T.ink }}>{s.card.he}</span>
+                  <span style={{ fontSize: 13, color: T.inkSoft, flex: 1, textAlign: "right" }}>{s.card.en}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {missed.length > 0 && (
+          <>
+            <p style={{ color: T.inkSoft, fontSize: 14.5, marginBottom: 6 }}>Words to learn again:</p>
+            <div style={{ border: `1.5px solid ${T.line}`, borderRadius: 14, background: T.card, textAlign: "left", marginBottom: 14 }}>
+              {missed.map((c, i) => (
+                <div key={c.id + i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
+                  {speech.usable && <SpeakerBtn text={c.he} voice={speech.voice} size={28} />}
+                  <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 22, color: T.ink }}>{c.he}</span>
+                  <span style={{ fontSize: 14, color: T.inkSoft, flex: 1, textAlign: "right" }}>{c.en}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+          <Btn kind="primary" style={{ background: accent.main, borderColor: accent.main }}
+            onClick={() => { setQueue(shuffleArr(deck.cards)); setIndex(0); setTyped(""); setPhase("typing"); setScore(0); setStreak(0); setMissed([]); setSlips([]); setWords([]); setHint(null); loggedRef.current = false; }}>
+            Try again
+          </Btn>
+          <Btn onClick={onExit}>Back to deck</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  const answered = ["right", "close", "wrong"].includes(phase);
+  const border = phase === "right" ? T.olive : phase === "wrong" ? T.pom : phase === "retry" || phase === "close" ? "#D9A62B" : T.line;
+
+  return (
+    <div style={{ maxWidth: 560, margin: "0 auto", fontFamily: uiFont }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+        <div style={{ flex: 1, height: 6, borderRadius: 3, background: T.line, overflow: "hidden" }}>
+          <div style={{ width: `${(index / queue.length) * 100}%`, height: "100%", background: accent.main, transition: "width 0.3s ease" }} />
+        </div>
+        {streak >= 3 && (
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#C64B4B", background: T.pomSoft, borderRadius: 999, padding: "4px 10px", whiteSpace: "nowrap", animation: "otiyot-pop 0.35s ease" }}>🔥 {streak}</span>
+        )}
+        <span style={{ fontSize: 13, color: T.inkSoft, whiteSpace: "nowrap" }}>{index + 1} of {queue.length}</span>
+      </div>
+
+      <div style={{ background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 20, padding: "28px 22px", textAlign: "center", boxShadow: "0 10px 30px rgba(31,42,68,0.06)", position: "relative" }}>
+        <div style={{ position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)" }}><Thread width={56} colors={[accent.main]} /></div>
+        {card.img && (
+          <img src={card.img} alt="" style={{ maxHeight: 80, maxWidth: "55%", objectFit: "contain", borderRadius: 12, marginBottom: 8 }} onError={(e) => { e.currentTarget.style.display = "none"; }} />
+        )}
+        <div style={{ fontSize: "clamp(24px, 6vw, 32px)", fontWeight: 500, color: T.ink, marginTop: 6 }}>{card.en}</div>
+        <div style={{ fontSize: 13, color: T.inkSoft, marginTop: 6 }}>Write it in Hebrew — vowel points not needed.</div>
+
+        <input
+          ref={inputRef}
+          dir="rtl"
+          lang="he"
+          value={typed}
+          readOnly={answered}
+          onChange={(e) => { setTyped(e.target.value); if (phase === "retry") setPhase("typing"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); answered ? next() : check(); } }}
+          placeholder="…"
+          style={{
+            width: "100%", boxSizing: "border-box", marginTop: 16, textAlign: "center",
+            fontFamily: heFont, fontSize: 28, padding: "10px 12px",
+            border: `2px solid ${border}`, borderRadius: 12, background: "#fff", color: T.ink, outline: "none",
+          }}
+        />
+
+        {hint === "letter" && !answered && (
+          <p style={{ fontSize: 14, color: T.inkSoft, marginBottom: 0 }}>
+            Starts with <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 22, color: T.ink }}>{bareLetters(card.he)[0]}</span>
+          </p>
+        )}
+        {hint === "tr" && !answered && (
+          <p style={{ fontSize: 15, fontStyle: "italic", color: T.inkSoft, marginBottom: 0 }}>
+            {card.tr || "No transliteration on this card."}
+          </p>
+        )}
+
+        {phase === "retry" && (
+          <p style={{ fontSize: 14.5, color: "#8A5208", fontWeight: 500, margin: "12px 0 0" }}>
+            So close — one letter is off. Have another look.
+          </p>
+        )}
+        {phase === "right" && (
+          <p style={{ fontSize: 15, color: T.olive, fontWeight: 500, margin: "12px 0 0" }}>Yes! ✓</p>
+        )}
+        {(phase === "close" || phase === "wrong") && (
+          <div style={{ marginTop: 12 }}>
+            <p style={{ fontSize: 14.5, color: phase === "close" ? "#8A5208" : T.pom, fontWeight: 500, margin: 0 }}>
+              {phase === "close" ? "Almost — this is how we spell it:" : "Not quite — the word is:"}
+            </p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 6 }}>
+              <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 30, color: T.ink }}>{card.he}</span>
+              {speech.usable && <SpeakerBtn text={card.he} voice={speech.voice} size={28} />}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginTop: 14 }}>
+        {!answered ? (
+          <>
+            <Btn kind="primary" onClick={check} disabled={!typed.trim()} style={{ padding: "11px 26px", background: accent.main, borderColor: accent.main }}>Check</Btn>
+            <Btn onClick={() => setHint("letter")} disabled={hint === "letter"}>💡 First letter</Btn>
+            <Btn onClick={() => setHint("tr")} disabled={hint === "tr"}>💡 Sound it out</Btn>
+            <Btn onClick={() => setKb((k) => !k)}>{kb ? "Hide keyboard" : "⌨️ Keyboard"}</Btn>
+          </>
+        ) : (
+          <Btn kind="primary" onClick={next} style={{ padding: "11px 28px" }}>
+            {index + 1 === queue.length ? "See how I did" : "Next →"}
+          </Btn>
+        )}
+      </div>
+
+      {kb && !answered && (
+        <div style={{ marginTop: 14, background: "#F2EFE7", border: `1.5px solid ${T.line}`, borderRadius: 14, padding: 8 }}>
+          {KB_ROWS.map((row, ri) => (
+            <div key={ri} style={{ display: "flex", gap: 4, justifyContent: "center", marginBottom: 4 }}>
+              {row.map((ch) => (
+                <button key={ch} onClick={() => type(ch)}
+                  style={{ flex: "1 1 0", minWidth: 0, maxWidth: 46, height: 42, fontFamily: heFont, fontSize: 20, color: T.ink, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 8, cursor: "pointer" }}>
+                  {ch}
+                </button>
+              ))}
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 4, justifyContent: "center" }}>
+            <button onClick={() => type(" ")} style={{ flex: 3, height: 42, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 8, cursor: "pointer", fontFamily: uiFont, fontSize: 13, color: T.inkSoft }}>space</button>
+            <button onClick={back} style={{ flex: 1, height: 42, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 8, cursor: "pointer", fontSize: 17 }}>⌫</button>
+          </div>
+          <p style={{ textAlign: "center", fontFamily: uiFont, fontSize: 11.5, color: T.inkSoft, margin: "6px 0 0" }}>
+            Same layout as a real Hebrew keyboard.
+          </p>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 16 }}>
+        <button onClick={onExit} style={{ border: "none", background: "none", fontSize: 13, color: T.inkSoft, cursor: "pointer", textDecoration: "underline" }}>End practice</button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- teacher report (anonymous aggregates) ---------- */
 
 function ReportPage({ deck, onExit }) {
@@ -1771,13 +2044,13 @@ function ReportPage({ deck, onExit }) {
 
   // aggregate per card, quiz results split by mode
   const agg = {};
-  for (const c of deck.cards) agg[c.id] = { card: c, rSeen: 0, rRight: 0, lSeen: 0, lRight: 0, sSeen: 0, sStruggled: 0 };
+  for (const c of deck.cards) agg[c.id] = { card: c, rSeen: 0, rRight: 0, lSeen: 0, lRight: 0, wSeen: 0, wRight: 0, sSeen: 0, sStruggled: 0 };
   for (const r of quizzes) {
-    const listen = r.mode === "listen";
     for (const w of r.words || []) {
       const a = agg[w.cardId];
       if (!a) continue;
-      if (listen) { a.lSeen++; if (w.right) a.lRight++; }
+      if (r.mode === "listen") { a.lSeen++; if (w.right) a.lRight++; }
+      else if (r.mode === "write") { a.wSeen++; if (w.right) a.wRight++; }
       else { a.rSeen++; if (w.right) a.rRight++; }
     }
   }
@@ -1789,12 +2062,13 @@ function ReportPage({ deck, onExit }) {
   const rows = Object.values(agg).map((a) => {
     const readAcc = a.rSeen > 0 ? a.rRight / a.rSeen : null;
     const listenAcc = a.lSeen > 0 ? a.lRight / a.lSeen : null;
+    const writeAcc = a.wSeen > 0 ? a.wRight / a.wSeen : null;
     const struggleRate = a.sSeen > 0 ? a.sStruggled / a.sSeen : null;
-    const qSeen = a.rSeen + a.lSeen;
-    const quizAcc = qSeen > 0 ? (a.rRight + a.lRight) / qSeen : null;
+    const qSeen = a.rSeen + a.lSeen + a.wSeen;
+    const quizAcc = qSeen > 0 ? (a.rRight + a.lRight + a.wRight) / qSeen : null;
     // sort score: quiz accuracy first (objective), study signal only as fallback
     const acc = quizAcc !== null ? quizAcc : struggleRate !== null ? 1 - struggleRate : null;
-    return { ...a, readAcc, listenAcc, struggleRate, quizAcc, qSeen, acc };
+    return { ...a, readAcc, listenAcc, writeAcc, struggleRate, quizAcc, qSeen, acc };
   });
   rows.sort((x, y) => {
     if (x.acc === null && y.acc === null) return 0;
@@ -1816,17 +2090,20 @@ function ReportPage({ deck, onExit }) {
   ];
 
   const verdict = (row) => {
-    const rOk = row.rSeen >= MIN_N;
-    const lOk = row.lSeen >= MIN_N;
-    if (rOk || lOk) {
-      // both modes have enough data and one is clearly weaker → name it
-      if (rOk && lOk && Math.abs(row.readAcc - row.listenAcc) >= 0.2) {
-        const weakListen = row.listenAcc < row.readAcc;
-        const b = BANDS[band(weakListen ? row.listenAcc : row.readAcc)];
-        return { ...b, label: `${b.label.split(" — ")[0]} (${weakListen ? "listening" : "reading"})` };
+    const solid = [
+      { label: "reading", seen: row.rSeen, acc: row.readAcc },
+      { label: "listening", seen: row.lSeen, acc: row.listenAcc },
+      { label: "writing", seen: row.wSeen, acc: row.writeAcc },
+    ].filter((m) => m.seen >= MIN_N);
+    if (solid.length) {
+      const weak = solid.reduce((a, b) => (a.acc <= b.acc ? a : b));
+      const strong = solid.reduce((a, b) => (a.acc >= b.acc ? a : b));
+      // one skill clearly lagging the others → name it
+      if (solid.length > 1 && strong.acc - weak.acc >= 0.2) {
+        const b = BANDS[band(weak.acc)];
+        return { ...b, label: `${b.label.split(" — ")[0]} (${weak.label})` };
       }
-      const acc = rOk && lOk ? row.quizAcc : rOk ? row.readAcc : row.listenAcc;
-      return BANDS[band(acc)];
+      return BANDS[band(solid.length === 1 ? solid[0].acc : row.quizAcc)];
     }
     if (row.qSeen > 0) return { label: "Needs more data", color: T.inkSoft, bg: "transparent" };
     // no quiz data at all — fall back to the (self-reported) study signal
@@ -1846,8 +2123,9 @@ function ReportPage({ deck, onExit }) {
       {/* usage summary */}
       <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 24 }}>
         {[
-          ["📖 Reading quizzes", quizzes.filter((r) => r.mode !== "listen").length],
+          ["📖 Reading quizzes", quizzes.filter((r) => r.mode !== "listen" && r.mode !== "write").length],
           ["🎧 Listening quizzes", quizzes.filter((r) => r.mode === "listen").length],
+          ["⌨️ Writing practice", quizzes.filter((r) => r.mode === "write").length],
           ["Average quiz score", avgScore === null ? "—" : `${avgScore}%`],
           ["Study sessions", studies.length - speakCount],
           ["🗣️ Speaking sessions", speakCount],
@@ -1863,11 +2141,12 @@ function ReportPage({ deck, onExit }) {
 
       {/* word table */}
       <div style={{ border: `1.5px solid ${T.line}`, borderRadius: 14, overflowX: "auto", background: T.card, marginBottom: 20 }}>
-        <div style={{ minWidth: 620 }}>
+        <div style={{ minWidth: 720 }}>
           <div style={{ display: "flex", gap: 12, padding: "10px 16px", fontSize: 11.5, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", color: T.inkSoft, borderBottom: `1px solid ${T.line}` }}>
             <span style={{ flex: 1 }}>Word · hardest first</span>
             <span style={{ width: 92, textAlign: "right" }}>📖 Reading</span>
             <span style={{ width: 92, textAlign: "right" }}>🎧 Listening</span>
+            <span style={{ width: 92, textAlign: "right" }}>⌨️ Writing</span>
             <span style={{ width: 88, textAlign: "right" }}>Study struggles</span>
             <span style={{ width: 156, textAlign: "right" }}>Verdict</span>
           </div>
@@ -1890,6 +2169,7 @@ function ReportPage({ deck, onExit }) {
                 </span>
                 <span style={{ width: 92, textAlign: "right" }}>{quizCell(row.readAcc, row.rRight, row.rSeen)}</span>
                 <span style={{ width: 92, textAlign: "right" }}>{quizCell(row.listenAcc, row.lRight, row.lSeen)}</span>
+                <span style={{ width: 92, textAlign: "right" }}>{quizCell(row.writeAcc, row.wRight, row.wSeen)}</span>
                 <span style={{ width: 88, textAlign: "right", fontSize: 14, color: row.sSeen === 0 ? "#C9C2B2" : T.inkSoft }} title={row.sSeen === 0 ? "No study sessions yet" : `Marked "still learning" in ${row.sStruggled} of ${row.sSeen} study sessions`}>
                   {pct(row.struggleRate)}
                 </span>
@@ -1929,8 +2209,10 @@ function ReportPage({ deck, onExit }) {
         )}
       </div>
       <p style={{ fontSize: 12.5, color: T.inkSoft, marginTop: 14 }}>
-        Verdicts come from quiz answers (a word needs at least 3 answers in a mode to count). When reading and
-        listening results differ a lot, the verdict names the weaker skill. "Study struggles" combines flashcard
+        Verdicts come from quiz answers (a word needs at least 3 answers in a mode to count). When one skill —
+        reading, listening or writing — lags clearly behind the others, the verdict names it. Writing counts a word
+        right only when it was spelled correctly first try; spelling slips the student then fixed count as misses,
+        so this column runs harder than the other two. "Study struggles" combines flashcard
         study and speaking practice and is self-reported — not every student taps "still learning" — so it only
         drives the verdict when a word has no quiz data, marked "(study only)". Chat practice counts in the numbers
         above like any other session — "Done in chat" shows how many of them happened through the chat screen.
@@ -2278,12 +2560,13 @@ function Header({ view, cls, deck, teacher, saving, onHome, onClass, onDeck, onT
 
   const crumbs = [crumb("Classes", onHome, view.page === "classes")];
   if (cls && view.page !== "classes") crumbs.push(crumb(cls.name, onClass, view.page === "decks"));
-  if (deck && (view.page === "deck" || view.page === "study" || view.page === "quiz" || view.page === "report" || view.page === "chat"))
+  if (deck && (view.page === "deck" || view.page === "study" || view.page === "quiz" || view.page === "report" || view.page === "chat" || view.page === "write"))
     crumbs.push(crumb(deck.name, onDeck, view.page === "deck"));
   if (view.page === "study") crumbs.push(crumb(view.mode === "speak" ? "Speaking practice" : "Studying", () => {}, true));
   if (view.page === "quiz") crumbs.push(crumb(view.mode === "listen" ? "Listening quiz" : "Reading quiz", () => {}, true));
   if (view.page === "report") crumbs.push(crumb("Report", () => {}, true));
   if (view.page === "chat") crumbs.push(crumb("Chat practice", () => {}, true));
+  if (view.page === "write") crumbs.push(crumb("Writing practice", () => {}, true));
 
   return (
     <header style={{ borderBottom: `1.5px solid ${T.line}`, background: "#FFFDF8" }}>
