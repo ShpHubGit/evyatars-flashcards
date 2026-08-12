@@ -108,21 +108,49 @@ async function persist(data) {
 function useHebrewVoice() {
   const [voice, setVoice] = useState(null);
   const [checked, setChecked] = useState(false);
+  const [all, setAll] = useState([]);
+  const [override, setOverride] = useState(false);
+  const [tick, setTick] = useState(0);
   const supported = typeof window !== "undefined" && !!window.speechSynthesis;
+
   useEffect(() => {
     if (!supported) { setChecked(true); return; }
+    let stopped = false, tries = 0;
+    // ChromeOS registers its speech engine late, so one check at load isn't enough —
+    // keep looking for a few seconds, and look again after the first tap or keypress.
     const pick = () => {
-      const vs = window.speechSynthesis.getVoices();
+      if (stopped) return;
+      const vs = window.speechSynthesis.getVoices() || [];
       if (vs.length) {
-        setVoice(vs.find((v) => (v.lang || "").toLowerCase().startsWith("he")) || null);
+        setAll(vs);
+        const he = vs.find((v) => (v.lang || "").toLowerCase().startsWith("he")) || null;
+        setVoice(he);
         setChecked(true);
+        if (he) return; // found it — stop polling
       }
+      tries++;
+      if (tries < 24) setTimeout(pick, 500);
+      else setChecked(true);
     };
     pick();
     window.speechSynthesis.addEventListener("voiceschanged", pick);
-    return () => window.speechSynthesis.removeEventListener("voiceschanged", pick);
-  }, [supported]);
-  return { voice, supported, checked };
+    const onGesture = () => pick();
+    window.addEventListener("pointerdown", onGesture);
+    window.addEventListener("keydown", onGesture);
+    return () => {
+      stopped = true;
+      window.speechSynthesis.removeEventListener("voiceschanged", pick);
+      window.removeEventListener("pointerdown", onGesture);
+      window.removeEventListener("keydown", onGesture);
+    };
+  }, [supported, tick]);
+
+  return {
+    voice, supported, checked, all, override,
+    usable: supported && (!!voice || override),
+    recheck: () => { setChecked(false); setTick((t) => t + 1); },
+    enableAnyway: () => setOverride(true),
+  };
 }
 
 function speakHebrew(text, voice) {
@@ -456,6 +484,48 @@ async function restoreResults(results) {
     }
   }
   return { written, skipped };
+}
+
+function VoiceHelp({ speech }) {
+  const [open, setOpen] = useState(false);
+  const [tested, setTested] = useState(false);
+  const langs = Array.from(new Set((speech.all || []).map((v) => v.lang).filter(Boolean))).sort();
+  const link = { border: "none", background: "none", fontFamily: uiFont, fontSize: 12.5, color: T.blue, cursor: "pointer", textDecoration: "underline", padding: 0 };
+  return (
+    <span style={{ fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft, flexBasis: "100%" }}>
+      Listening quiz is off — no Hebrew voice found on this device.{" "}
+      <button onClick={speech.recheck} style={link}>Check again</button>
+      {" · "}
+      <button onClick={() => setOpen((o) => !o)} style={link}>{open ? "hide help" : "how to fix"}</button>
+      {open && (
+        <div style={{ background: "#FBF0DD", border: "1px solid #EBD3A6", borderRadius: 10, padding: "10px 12px", marginTop: 8, color: "#6B4E0F", lineHeight: 1.55 }}>
+          <p style={{ margin: "0 0 8px" }}>
+            <strong>On a Chromebook:</strong> Settings → Accessibility → Text-to-speech voice settings → under
+            Speech Engines, choose Settings next to "Chrome OS built-in text-to-speech extension" → find Hebrew
+            (עברית) → Install. On school-managed Chromebooks this is often blocked, and your IT admin has to push
+            it from the Google Admin console.
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            First try this — if you hear Hebrew, the device can do it and the quiz just needs turning on:
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <Btn onClick={() => { speakHebrew("שָׁלוֹם, מַה נִּשְׁמָע", null); setTested(true); }} style={{ fontSize: 12.5, padding: "6px 11px" }}>
+              🔊 Test Hebrew sound
+            </Btn>
+            {tested && (
+              <Btn kind="primary" onClick={speech.enableAnyway} style={{ fontSize: 12.5, padding: "6px 11px" }}>
+                I heard it — turn the quiz on
+              </Btn>
+            )}
+          </div>
+          <p style={{ margin: 0, fontSize: 11.5 }}>
+            This device reports {speech.all?.length || 0} voice{(speech.all?.length || 0) === 1 ? "" : "s"}
+            {langs.length ? `: ${langs.slice(0, 25).join(", ")}` : "."}
+          </p>
+        </div>
+      )}
+    </span>
+  );
 }
 
 /* ---------- tiny UI atoms ---------- */
@@ -1152,9 +1222,9 @@ export default function App() {
               📖 Reading quiz
             </Btn>
             <Btn
-              disabled={deck.cards.length < 2 || !speech.supported || !speech.voice}
+              disabled={deck.cards.length < 2 || !speech.usable}
               onClick={() => setView({ page: "quiz", classId: view.classId, deckId: deck.id, mode: "listen" })}
-              title={!speech.voice ? "This device has no Hebrew voice installed" : undefined}
+              title={!speech.usable ? "This device has no Hebrew voice installed" : undefined}
             >
               🎧 Listening quiz
             </Btn>
@@ -1173,8 +1243,8 @@ export default function App() {
             {deck.cards.length < 2 && (
               <span style={{ fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft }}>Quizzes need at least 2 cards.</span>
             )}
-            {deck.cards.length >= 2 && speech.checked && speech.supported && !speech.voice && (
-              <span style={{ fontFamily: uiFont, fontSize: 12.5, color: T.inkSoft }}>Listening quiz is off — no Hebrew voice on this device.</span>
+            {deck.cards.length >= 2 && speech.checked && speech.supported && !speech.usable && (
+              <VoiceHelp speech={speech} />
             )}
           </div>
         </div>
@@ -1193,7 +1263,7 @@ export default function App() {
                   borderTop: i === 0 ? "none" : `1px solid ${T.line}`,
                 }}
               >
-                {speech.supported && speech.voice && <SpeakerBtn text={c.he} voice={speech.voice} size={30} />}
+                {speech.usable && <SpeakerBtn text={c.he} voice={speech.voice} size={30} />}
                 <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 24, color: T.ink, minWidth: 110, textAlign: "right" }}>
                   {c.he}
                 </span>
@@ -1354,7 +1424,7 @@ function StudyPage({ deck, accent = SHUK[0], speech, session, setSession, answer
                   <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: "clamp(34px, 9vw, 56px)", color: T.ink, lineHeight: 1.4, overflowWrap: "break-word", minWidth: 0 }}>
                     {current.he}
                   </span>
-                  {speech.supported && speech.voice && <SpeakerBtn text={current.he} voice={speech.voice} />}
+                  {speech.usable && <SpeakerBtn text={current.he} voice={speech.voice} />}
                 </div>
                 {session.showTr && current.tr && (
                   <span style={{ fontFamily: uiFont, fontSize: 17, fontStyle: "italic", color: T.inkSoft, marginTop: 10 }}>
@@ -1375,7 +1445,7 @@ function StudyPage({ deck, accent = SHUK[0], speech, session, setSession, answer
                   <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: "clamp(34px, 9vw, 52px)", color: T.ink, lineHeight: 1.4, overflowWrap: "break-word", minWidth: 0 }}>
                     {current.he}
                   </span>
-                  {speech.supported && speech.voice && <SpeakerBtn text={current.he} voice={speech.voice} />}
+                  {speech.usable && <SpeakerBtn text={current.he} voice={speech.voice} />}
                 </div>
                 {session.showTr && current.tr && (
                   <span style={{ fontFamily: uiFont, fontSize: 17, fontStyle: "italic", color: T.inkSoft, marginTop: 8 }}>
@@ -1399,7 +1469,7 @@ function StudyPage({ deck, accent = SHUK[0], speech, session, setSession, answer
                   <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 22, color: T.inkSoft }}>
                     {current.he}
                   </span>
-                  {speech.supported && speech.voice && <SpeakerBtn text={current.he} voice={speech.voice} size={28} />}
+                  {speech.usable && <SpeakerBtn text={current.he} voice={speech.voice} size={28} />}
                 </div>
                 {session.showTr && current.tr && (
                   <span style={{ fontFamily: uiFont, fontSize: 15, fontStyle: "italic", color: T.inkSoft, marginTop: 6 }}>
@@ -1426,7 +1496,7 @@ function StudyPage({ deck, accent = SHUK[0], speech, session, setSession, answer
           {session.showTr ? "Hide transliteration" : "Show transliteration"}
         </button>
       </div>
-      {speech.supported && speech.checked && !speech.voice && (
+      {speech.supported && speech.checked && !speech.usable && (
         <p style={{ textAlign: "center", fontFamily: uiFont, fontSize: 12, color: T.inkSoft, marginTop: 8 }}>
           This device has no Hebrew voice installed, so read-aloud is turned off here.
         </p>
@@ -1549,7 +1619,7 @@ function QuizPage({ deck, accent = SHUK[0], mode, speech, onExit }) {
           <div style={{ border: `1.5px solid ${T.line}`, borderRadius: 14, background: T.card, textAlign: "left", margin: "16px 0" }}>
             {missed.map((c, i) => (
               <div key={c.id + i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderTop: i === 0 ? "none" : `1px solid ${T.line}` }}>
-                {speech.supported && speech.voice && <SpeakerBtn text={c.he} voice={speech.voice} size={28} />}
+                {speech.usable && <SpeakerBtn text={c.he} voice={speech.voice} size={28} />}
                 <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: 22, color: T.ink }}>{c.he}</span>
                 <span style={{ fontSize: 14, color: T.inkSoft, flex: 1, textAlign: "right" }}>{c.en}</span>
               </div>
@@ -1593,7 +1663,7 @@ function QuizPage({ deck, accent = SHUK[0], mode, speech, onExit }) {
             <span dir="rtl" lang="he" style={{ fontFamily: heFont, fontSize: "clamp(32px, 8vw, 48px)", color: T.ink, lineHeight: 1.4, overflowWrap: "break-word", minWidth: 0 }}>
               {q.card.he}
             </span>
-            {speech.supported && speech.voice && <SpeakerBtn text={q.card.he} voice={speech.voice} />}
+            {speech.usable && <SpeakerBtn text={q.card.he} voice={speech.voice} />}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
@@ -1879,7 +1949,7 @@ function ChatPage({ deck, accent = SHUK[0], speech, onExit }) {
   const scrollRef = useRef(null);
   const timers = useRef([]);
   const canQuiz = deck.cards.length >= 2;
-  const hasVoice = speech.supported && !!speech.voice;
+  const hasVoice = speech.usable;
 
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
   useEffect(() => {
