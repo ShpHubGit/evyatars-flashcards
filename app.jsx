@@ -115,30 +115,31 @@ function useHebrewVoice() {
 
   useEffect(() => {
     if (!supported) { setChecked(true); return; }
-    let stopped = false, tries = 0;
-    // ChromeOS registers its speech engine late, so one check at load isn't enough —
-    // keep looking for a few seconds, and look again after the first tap or keypress.
+    let stopped = false, tries = 0, timer = null;
+    // ChromeOS registers its speech engine late, so one check at load isn't enough.
+    // A single chain only — restarting it on every click would pile up timers.
     const pick = () => {
       if (stopped) return;
       const vs = window.speechSynthesis.getVoices() || [];
       if (vs.length) {
-        setAll(vs);
+        setAll((prev) => (prev.length === vs.length ? prev : vs));
         const he = vs.find((v) => (v.lang || "").toLowerCase().startsWith("he")) || null;
-        setVoice(he);
+        setVoice((prev) => (prev === he ? prev : he));
         setChecked(true);
-        if (he) return; // found it — stop polling
+        if (he) { stopped = true; return; }
       }
       tries++;
-      if (tries < 24) setTimeout(pick, 500);
-      else setChecked(true);
+      if (tries < 20) timer = setTimeout(pick, 600);
+      else { stopped = true; setChecked(true); }
     };
     pick();
     window.speechSynthesis.addEventListener("voiceschanged", pick);
     const onGesture = () => pick();
-    window.addEventListener("pointerdown", onGesture);
-    window.addEventListener("keydown", onGesture);
+    window.addEventListener("pointerdown", onGesture, { once: true });
+    window.addEventListener("keydown", onGesture, { once: true });
     return () => {
       stopped = true;
+      if (timer) clearTimeout(timer);
       window.speechSynthesis.removeEventListener("voiceschanged", pick);
       window.removeEventListener("pointerdown", onGesture);
       window.removeEventListener("keydown", onGesture);
