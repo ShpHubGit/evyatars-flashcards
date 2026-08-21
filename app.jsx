@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, collection, addDoc, query, where, getDocs, writeBatch } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, addDoc, query, where, getDocs, writeBatch } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 
 /* ---------- firebase ---------- */
@@ -777,7 +777,25 @@ export default function App() {
   );
 
   useEffect(() => {
-    loadData().then(setData).catch(() => setLoadError(true));
+    loadData().then((d) => { dataRef.current = d; setData(d); }).catch(() => setLoadError(true));
+  }, []);
+
+  // keep in step with Firestore so no open copy of the app holds a stale deck list
+  useEffect(() => {
+    if (!db) return;
+    return onSnapshot(
+      doc(db, "app", "data"),
+      (snap) => {
+        if (snap.metadata.hasPendingWrites) return; // our own write echoing back
+        const d = snap.data();
+        if (d && Array.isArray(d.classes)) {
+          const next = { classes: d.classes };
+          dataRef.current = next;
+          setData(next);
+        }
+      },
+      () => {}
+    );
   }, []);
 
   // teacher mode = signed in to Firebase Auth (survives page reloads)
@@ -786,13 +804,25 @@ export default function App() {
     return onAuthStateChanged(auth, (u) => setTeacher(!!u));
   }, []);
 
+  // Edits apply to a ref that updates immediately, not to the `data` captured at render
+  // time. Two edits made in quick succession used to clone the same stale copy, so the
+  // second silently wiped the first. Writes are queued so they land in order.
+  const dataRef = useRef(null);
+  const writeQueue = useRef(Promise.resolve());
+
   const update = async (fn) => {
-    const next = fn(structuredClone(data));
+    const base = dataRef.current || data;
+    if (!base) return;
+    const next = fn(structuredClone(base));
+    dataRef.current = next;
     setData(next);
     setSaving(true);
-    const ok = await persist(next);
+    writeQueue.current = writeQueue.current.then(async () => {
+      const ok = await persist(next);
+      if (!ok) window.alert("That change didn't save — check you're signed in and online, then try again.");
+    });
+    await writeQueue.current;
     setSaving(false);
-    if (!ok) window.alert("Saving failed — check that you're signed in as the teacher and online, then redo that edit.");
   };
 
   const cls = data && view.classId ? data.classes.find((c) => c.id === view.classId) : null;
@@ -978,7 +1008,7 @@ export default function App() {
           initial={modal.deck?.name || ""}
           placeholder="e.g. Unit 4 Food Words"
           showDraft
-          draft={modal.deck ? !!modal.deck.draft : true}
+          draft={modal.deck ? !!modal.deck.draft : false}
           onClose={() => setModal(null)}
           onSave={(name, isDraft) => {
             update((d) => {
